@@ -11,4 +11,14 @@
     <depends optional="true">com.github.copilot</depends>
 
     <resource-bundle>messages.VoiceBundle</resource-bundle>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="CopilotVoice" displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <action id="com.example.copilotvoice.PushToTalk" class="com.example.copilotvoice.actions.PushToTalkAction" text="Copilot Voice: Push to Talk">
+            <keyboard-shortcut first-keystroke="control alt shift D"/>
+        </action>
+    </actions>
 </idea-plugin>
