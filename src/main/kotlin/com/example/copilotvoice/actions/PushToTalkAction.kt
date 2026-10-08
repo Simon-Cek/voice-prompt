@@ -3,6 +3,8 @@ package com.example.copilotvoice.actions
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.audio.AudioCapture
 import com.example.copilotvoice.audio.WavFile
+import com.example.copilotvoice.stt.ModelManager
+import com.example.copilotvoice.stt.WhisperCliEngine
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
@@ -12,6 +14,8 @@ import com.intellij.openapi.actionSystem.KeyboardShortcut
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.Task
 import java.awt.AWTEvent
 import java.awt.Toolkit
 import java.awt.event.AWTEventListener
@@ -108,14 +112,39 @@ class PushToTalkAction : AnAction() {
         fun stop(project: Project?) {
             val samples = capture.stop()
             if (samples.isEmpty()) return
-            val seconds = samples.size / AudioCapture.SAMPLE_RATE.toFloat()
             try {
                 val wavFile = File(System.getProperty("java.io.tmpdir"), "copilot-voice-${System.currentTimeMillis()}.wav")
                 WavFile.write(wavFile, samples, AudioCapture.DEFAULT_FORMAT)
-                notify(project, VoiceBundle.message("notification.captured", seconds, wavFile.path), NotificationType.INFORMATION)
+                transcribeInBackground(project, wavFile)
             } catch (t: Exception) {
                 notify(project, VoiceBundle.message("notification.wav.failed", t.message ?: t.javaClass.simpleName), NotificationType.WARNING)
             }
+        }
+
+        private fun transcribeInBackground(project: Project?, wavFile: File) {
+            val model = ModelManager.resolveActive(null, ModelManager.DEFAULT_MODEL)
+            if (model == null) {
+                notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
+                wavFile.delete()
+                return
+            }
+            val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
+                override fun run(indicator: ProgressIndicator) {
+                    try {
+                        val text = WhisperCliEngine().transcribe(wavFile, model)
+                        if (text.isBlank()) {
+                            notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
+                        } else {
+                            notify(project, text, NotificationType.INFORMATION)
+                        }
+                    } catch (t: Exception) {
+                        notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                    } finally {
+                        wavFile.delete()
+                    }
+                }
+            }
+            task.queue()
         }
 
         private fun notify(project: Project?, content: String, type: NotificationType) {

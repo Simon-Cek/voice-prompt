@@ -1,0 +1,59 @@
+package com.example.copilotvoice.stt
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+import java.nio.file.Path
+import java.nio.file.Paths
+
+class WhisperRuntimeTest {
+
+    @Test
+    fun `derives soname symlinks from versioned library names`() {
+        val realFiles = listOf(
+            "whisper-cli",
+            "libwhisper.so.1.9.5",
+            "libggml.so.0.26.0",
+            "libggml-base.so.0.26.0",
+            "libggml-cpu-sse42.so",
+        )
+        assertEquals(
+            mapOf(
+                "libwhisper.so.1" to "libwhisper.so.1.9.5",
+                "libggml.so.0" to "libggml.so.0.26.0",
+                "libggml-base.so.0" to "libggml-base.so.0.26.0",
+            ),
+            WhisperRuntime.sonameSymlinks(realFiles),
+        )
+    }
+
+    @Test
+    fun `ignores executables and already-sonamed files`() {
+        assertEquals(emptyMap<String, String>(), WhisperRuntime.sonameSymlinks(listOf("whisper-cli", "libfoo.so")))
+    }
+}
+
+class WhisperCliEngineTest {
+
+    private val cli: Path = Paths.get("/opt/copilot-voice/runtime/b5454/linux-x64/whisper-cli")
+    private val model: Path = Paths.get("/home/user/.cache/models/ggml-base.en.bin")
+
+    @Test
+    fun `builds whisper-cli arguments`() {
+        assertEquals(
+            listOf(
+                "/opt/copilot-voice/runtime/b5454/linux-x64/whisper-cli",
+                "-m", "/home/user/.cache/models/ggml-base.en.bin",
+                "-f", "/tmp/recording.wav",
+                "-nt",
+                "-l", "en",
+            ),
+            WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en"),
+        )
+    }
+
+    @Test
+    fun `uses the requested language`() {
+        val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/a.wav"), model, "de")
+        assertEquals("de", args[args.indexOf("-l") + 1])
+    }
+}
