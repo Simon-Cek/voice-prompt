@@ -18,7 +18,7 @@
 
     <actions>
         <action id="com.example.copilotvoice.PushToTalk" class="com.example.copilotvoice.actions.PushToTalkAction" text="Copilot Voice: Push to Talk">
-            <keyboard-shortcut first-keystroke="control alt shift D"/>
+            <keyboard-shortcut first-keystroke="control alt shift D" keymap="$default"/>
         </action>
     </actions>
 </idea-plugin>
