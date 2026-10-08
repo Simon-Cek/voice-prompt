@@ -1,6 +1,7 @@
 package com.example.copilotvoice.stt
 
 import com.intellij.execution.configurations.GeneralCommandLine
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.util.SystemInfo
 import java.io.File
 import java.io.IOException
@@ -8,6 +9,8 @@ import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
 class WhisperCliEngine {
+
+    private val log = Logger.getInstance(WhisperCliEngine::class.java)
 
     class TranscriptionException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -22,6 +25,7 @@ class WhisperCliEngine {
         val process = try {
             commandLine.createProcess()
         } catch (t: IOException) {
+            log.warn("failed to start whisper-cli at $cli", t)
             throw TranscriptionException("Could not start whisper-cli at $cli", t)
         }
 
@@ -46,6 +50,9 @@ class WhisperCliEngine {
             throw TranscriptionException("whisper-cli timed out after ${timeoutMs} ms")
         }
         val exitCode = process.exitValue()
+        log.info(
+            "whisper-cli exit=$exitCode stdoutLen=${stdout.length} stderr='${stderr.toString().trim().take(300)}'",
+        )
         if (exitCode != 0) {
             val detail = stderr.toString().trim().lineSequence().toList().takeLast(5).joinToString(" | ")
             throw TranscriptionException("whisper-cli exited with code $exitCode${if (detail.isNotEmpty()) ": $detail" else ""}")

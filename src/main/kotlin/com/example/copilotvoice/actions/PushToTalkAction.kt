@@ -3,6 +3,7 @@ package com.example.copilotvoice.actions
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.audio.AudioCapture
 import com.example.copilotvoice.audio.WavFile
+import com.example.copilotvoice.sink.ChatSinkChain
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
 import com.intellij.notification.NotificationGroupManager
@@ -12,6 +13,7 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.KeyboardShortcut
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.progress.ProgressIndicator
@@ -34,12 +36,15 @@ class PushToTalkAction : AnAction() {
         const val ACTION_ID = "com.example.copilotvoice.PushToTalk"
         const val NOTIFICATION_GROUP_ID = "CopilotVoice"
 
+        private val log = Logger.getInstance(PushToTalkAction::class.java)
+
         private val MODIFIER_MASK = InputEvent.SHIFT_MASK or
             InputEvent.CTRL_MASK or InputEvent.META_MASK or InputEvent.ALT_MASK
 
         private val capture = AudioCapture().also { it.onMaxDurationReached = { stop(activeProject()) } }
         @Volatile private var watcherInstalled = false
         private val downKeys = HashMap<Int, Int>()
+        private val chatSink = ChatSinkChain.default()
 
         val isRecording: Boolean get() = capture.isRecording()
 
@@ -124,20 +129,24 @@ class PushToTalkAction : AnAction() {
         private fun transcribeInBackground(project: Project?, wavFile: File) {
             val model = ModelManager.resolveActive(null, ModelManager.DEFAULT_MODEL)
             if (model == null) {
+                log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
                 notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
                 wavFile.delete()
                 return
             }
+            log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
                     try {
                         val text = WhisperCliEngine().transcribe(wavFile, model)
+                        log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
                             notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
                         } else {
-                            notify(project, text, NotificationType.INFORMATION)
+                            deliverToChat(project, text)
                         }
-                    } catch (t: Exception) {
+                    } catch (t: Throwable) {
+                        log.error("transcribe threw", t)
                         notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                     } finally {
                         wavFile.delete()
@@ -145,6 +154,24 @@ class PushToTalkAction : AnAction() {
                 }
             }
             task.queue()
+        }
+
+        private fun deliverToChat(project: Project?, text: String) {
+            ApplicationManager.getApplication().invokeLater {
+                try {
+                    log.info("deliverToChat on EDT: inserting ${text.length} chars")
+                    val result = chatSink.insert(project, text, autoSend = false)
+                    if (result.isSuccess) {
+                        log.info("deliverToChat: sink insert succeeded")
+                    } else {
+                        log.warn("deliverToChat: all sinks failed -> balloon", result.exceptionOrNull())
+                        notify(project, text, NotificationType.INFORMATION)
+                    }
+                } catch (t: Throwable) {
+                    log.error("deliverToChat threw -> balloon", t)
+                    notify(project, text, NotificationType.INFORMATION)
+                }
+            }
         }
 
         private fun notify(project: Project?, content: String, type: NotificationType) {
