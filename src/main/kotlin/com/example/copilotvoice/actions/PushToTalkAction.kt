@@ -6,6 +6,7 @@ import com.example.copilotvoice.audio.WavFile
 import com.example.copilotvoice.sink.ChatSinkChain
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
+import com.intellij.notification.Notification
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
@@ -45,6 +46,7 @@ class PushToTalkAction : AnAction() {
         @Volatile private var watcherInstalled = false
         private val downKeys = HashMap<Int, Int>()
         private val chatSink = ChatSinkChain.default()
+        @Volatile private var listeningNotification: Notification? = null
 
         val isRecording: Boolean get() = capture.isRecording()
 
@@ -111,10 +113,11 @@ class PushToTalkAction : AnAction() {
                 notify(project, VoiceBundle.message("notification.mic.open.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                 return
             }
-            notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)
+            listeningNotification = notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)
         }
 
         fun stop(project: Project?) {
+            dismissListening()
             val samples = capture.stop()
             if (samples.isEmpty()) return
             try {
@@ -174,8 +177,18 @@ class PushToTalkAction : AnAction() {
             }
         }
 
-        private fun notify(project: Project?, content: String, type: NotificationType) {
-            val target = project ?: activeProject() ?: return
+        private fun dismissListening() {
+            val n = listeningNotification ?: return
+            listeningNotification = null
+            if (java.awt.EventQueue.isDispatchThread()) {
+                n.expire()
+            } else {
+                ApplicationManager.getApplication().invokeLater { n.expire() }
+            }
+        }
+
+        private fun notify(project: Project?, content: String, type: NotificationType): Notification? {
+            val target = project ?: activeProject() ?: return null
             val group = NotificationGroupManager.getInstance().getNotificationGroup(NOTIFICATION_GROUP_ID)
             val notification = group.createNotification(content, type)
             if (java.awt.EventQueue.isDispatchThread()) {
@@ -183,6 +196,7 @@ class PushToTalkAction : AnAction() {
             } else {
                 ApplicationManager.getApplication().invokeLater { notification.notify(target) }
             }
+            return notification
         }
     }
 }
