@@ -1,0 +1,14 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>com.example.copilotvoice</id>
+    <name>Copilot Voice</name>
+    <vendor>Simon Cek</vendor>
+    <description><![CDATA[
+        <p>Voice input for GitHub Copilot Chat in IntelliJ-based IDEs. Hold a shortcut, speak, release — your words land in the Copilot chat, transcribed locally with whisper.cpp.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true">com.github.copilot</depends>
+
+    <resource-bundle>messages.VoiceBundle</resource-bundle>
+</idea-plugin>
