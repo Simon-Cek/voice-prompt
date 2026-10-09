@@ -1,5 +1,6 @@
 package com.example.copilotvoice.settings
 
+import com.example.copilotvoice.stt.ModelManager
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
@@ -15,6 +16,8 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         var soundEnabled: Boolean = true
         /** Name of the selected capture device, or null for the system default microphone. */
         var inputDevice: String? = null
+        /** Selected Whisper model id (e.g. "base.en"). */
+        var modelName: String = ModelManager.DEFAULT_MODEL
     }
 
     private val state = State()
@@ -41,6 +44,12 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         get() = state.inputDevice
         set(value) {
             state.inputDevice = value
+        }
+
+    var modelName: String
+        get() = state.modelName
+        set(value) {
+            state.modelName = value
         }
 
     override fun getState(): State = state

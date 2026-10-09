@@ -145,7 +145,7 @@ class PushToTalkAction : AnAction() {
         }
 
         private fun transcribeInBackground(project: Project?, wavFile: File) {
-            val model = ModelManager.resolveActive(null, ModelManager.DEFAULT_MODEL)
+            val model = ModelManager.resolveActive(null, CopilotVoiceSettings.instance.modelName)
             if (model == null) {
                 log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
                 notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
