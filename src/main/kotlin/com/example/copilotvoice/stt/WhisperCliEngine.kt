@@ -14,9 +14,9 @@ class WhisperCliEngine {
 
     class TranscriptionException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
-    fun transcribe(wavFile: File, model: Path, language: String = "en", timeoutMs: Long = DEFAULT_TIMEOUT_MS, useGpu: Boolean = false): String {
+    fun transcribe(wavFile: File, model: Path, language: String = "en", timeoutMs: Long = DEFAULT_TIMEOUT_MS, useGpu: Boolean = false, threads: Int = 0): String {
         val cli = WhisperRuntime.cliPath()
-        val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language, useGpu))
+        val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language, useGpu, threads))
             .withWorkDirectory(WhisperRuntime.runtimeDir(cli))
         if (SystemInfo.isLinux || SystemInfo.isMac) {
             commandLine.withEnvironment("LD_LIBRARY_PATH", WhisperRuntime.runtimeDir(cli))
@@ -60,7 +60,7 @@ class WhisperCliEngine {
         return stdout.toString().trim()
     }
 
-    fun buildArguments(cli: Path, wavFile: File, model: Path, language: String, useGpu: Boolean = false): List<String> {
+    fun buildArguments(cli: Path, wavFile: File, model: Path, language: String, useGpu: Boolean = false, threads: Int = 0): List<String> {
         val base = listOf(
             cli.toString(),
             "-m", model.toString(),
@@ -68,8 +68,10 @@ class WhisperCliEngine {
             "-nt",
             "-l", language,
         )
+        // whisper.cpp defaults to just 4 threads; pass -t only when a concrete count is resolved.
+        val withThreads = if (threads > 0) base + listOf("-t", threads.toString()) else base
         // whisper.cpp runs on the GPU by default; pass --no-gpu to force CPU-only inference.
-        return if (useGpu) base else base + listOf("--no-gpu")
+        return if (useGpu) withThreads else withThreads + listOf("--no-gpu")
     }
 
     companion object {

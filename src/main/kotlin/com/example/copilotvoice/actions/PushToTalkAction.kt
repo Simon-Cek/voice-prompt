@@ -158,7 +158,7 @@ class PushToTalkAction : AnAction() {
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
                     try {
-                        val text = WhisperCliEngine().transcribe(wavFile, model, useGpu = useGpu())
+                        val text = WhisperCliEngine().transcribe(wavFile, model, useGpu = useGpu(), threads = threads())
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
                             notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
@@ -185,6 +185,12 @@ class PushToTalkAction : AnAction() {
                 // no Vulkan backend is bundled for this platform.
                 ProcessingMode.GPU, ProcessingMode.AUTOMATIC -> WhisperRuntime.gpuBackendAvailable()
             }
+        }
+
+        /** CPU threads for whisper: the user's setting, or the recommended physical core count. */
+        private fun threads(): Int {
+            val set = CopilotVoiceSettings.instance.threads
+            return if (set > 0) set else WhisperRuntime.recommendedThreads()
         }
 
         private fun deliverToChat(project: Project?, text: String) {

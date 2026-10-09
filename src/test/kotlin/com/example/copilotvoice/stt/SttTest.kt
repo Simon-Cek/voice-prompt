@@ -71,4 +71,27 @@ class WhisperCliEngineTest {
         val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en", useGpu = true)
         assertFalse(args.contains("--no-gpu"))
     }
+
+    @Test
+    fun `passes the resolved thread count with -t`() {
+        val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en", useGpu = true, threads = 8)
+        assertEquals("8", args[args.indexOf("-t") + 1])
+    }
+
+    @Test
+    fun `omits -t when no thread count is set`() {
+        val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en")
+        assertFalse(args.contains("-t"))
+    }
+}
+
+class WhisperRuntimeThreadsTest {
+
+    @Test
+    fun `recommended threads stay within the available range`() {
+        val available = WhisperRuntime.availableThreads()
+        val recommended = WhisperRuntime.recommendedThreads()
+        assertTrue("recommended >= 1", recommended >= 1)
+        assertTrue("recommended <= available ($recommended <= $available)", recommended <= available)
+    }
 }

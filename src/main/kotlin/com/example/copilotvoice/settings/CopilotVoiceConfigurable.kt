@@ -30,6 +30,8 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JRadioButton
 import javax.swing.JSeparator
+import javax.swing.JSpinner
+import javax.swing.SpinnerNumberModel
 
 class CopilotVoiceConfigurable : Configurable {
 
@@ -42,6 +44,8 @@ class CopilotVoiceConfigurable : Configurable {
     private val activeCombo = JComboBox<String>()
     private val processingCombo = JComboBox<String>()
     private val processingHint = JLabel("")
+    private val threadsSpinner = JSpinner()
+    private val threadsHint = JLabel("")
     private val downloadButton = JButton(VoiceBundle["model.download"])
     private val deleteButton = JButton(VoiceBundle["model.delete"])
 
@@ -67,6 +71,10 @@ class CopilotVoiceConfigurable : Configurable {
         downloadButton.addActionListener { downloadSelectedModel() }
         deleteButton.addActionListener { deleteSelectedModel() }
         for (mode in ProcessingMode.values()) processingCombo.addItem(processingLabel(mode))
+        val maxThreads = WhisperRuntime.availableThreads()
+        threadsSpinner.model = SpinnerNumberModel(
+            WhisperRuntime.recommendedThreads().coerceIn(1, maxThreads), 1, maxThreads, 1,
+        )
         refreshModels()
     }
 
@@ -81,7 +89,8 @@ class CopilotVoiceConfigurable : Configurable {
             soundCheckbox.isSelected != s.soundEnabled ||
             selectedInputDevice() != s.inputDevice ||
             selectedActiveId() != s.modelName ||
-            selectedProcessing() != s.processingMode
+            selectedProcessing() != s.processingMode ||
+            selectedThreads() != effectiveThreads(s)
     }
 
     override fun apply() {
@@ -92,6 +101,7 @@ class CopilotVoiceConfigurable : Configurable {
         s.inputDevice = selectedInputDevice()
         selectedActiveId()?.let { s.modelName = it }
         s.processingMode = selectedProcessing()
+        s.threads = selectedThreads()
     }
 
     override fun reset() {
@@ -104,6 +114,9 @@ class CopilotVoiceConfigurable : Configurable {
         inputDeviceCombo.selectedItem = if (s.inputDevice == null) SYSTEM_DEFAULT else s.inputDevice
         processingCombo.selectedItem = processingLabel(s.processingMode)
         processingHint.text = if (WhisperRuntime.gpuBackendAvailable()) "" else VoiceBundle["processing.gpu.hint"]
+        val maxThreads = WhisperRuntime.availableThreads()
+        (threadsSpinner.model as SpinnerNumberModel).setValue(effectiveThreads(s).coerceIn(1, maxThreads))
+        threadsHint.text = VoiceBundle.message("threads.hint", WhisperRuntime.availableThreads(), WhisperRuntime.recommendedThreads())
         refreshModels()
     }
 
@@ -120,6 +133,12 @@ class CopilotVoiceConfigurable : Configurable {
         val idx = processingCombo.selectedIndex
         return ProcessingMode.values().getOrElse(idx) { ProcessingMode.AUTOMATIC }
     }
+
+    private fun selectedThreads(): Int = (threadsSpinner.value as? Number)?.toInt() ?: 0
+
+    /** The stored threads, or the recommended physical core count when unset (0). */
+    private fun effectiveThreads(s: CopilotVoiceSettings): Int =
+        if (s.threads > 0) s.threads else WhisperRuntime.recommendedThreads()
 
     /** The model id backing the currently selected "available" row, or null. */
     private fun selectedAvailableId(): String? {
@@ -316,11 +335,15 @@ class CopilotVoiceConfigurable : Configurable {
         val availableRow = JPanel(BorderLayout(8, 0))
         availableRow.add(availableCombo, BorderLayout.CENTER)
         availableRow.add(buttons, BorderLayout.EAST)
+        val threadsRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
+        threadsRow.add(threadsSpinner)
+        threadsRow.add(threadsHint)
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(VoiceBundle["model.available.title"], availableRow)
             .addLabeledComponent(VoiceBundle["model.active.title"], activeCombo)
             .addLabeledComponent(VoiceBundle["processing.title"], processingCombo)
             .addComponent(processingHint)
+            .addLabeledComponent(VoiceBundle["threads.title"], threadsRow)
             .panel
     }
 }

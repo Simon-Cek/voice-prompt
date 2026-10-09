@@ -20,6 +20,8 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         var modelName: String = ModelManager.DEFAULT_MODEL
         /** How to run inference: Automatic / CPU / GPU. */
         var processingMode: ProcessingMode = ProcessingMode.AUTOMATIC
+        /** CPU threads for whisper; 0 = auto (recommended physical core count). */
+        var threads: Int = 0
     }
 
     private val state = State()
@@ -58,6 +60,12 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         get() = state.processingMode
         set(value) {
             state.processingMode = value
+        }
+
+    var threads: Int
+        get() = state.threads
+        set(value) {
+            state.threads = value
         }
 
     override fun getState(): State = state
