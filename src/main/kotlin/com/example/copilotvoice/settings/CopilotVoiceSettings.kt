@@ -11,6 +11,8 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
 
     class State {
         var autoSend: Boolean = false
+        var mode: RecordingMode = RecordingMode.HOLD
+        var soundEnabled: Boolean = true
     }
 
     private val state = State()
@@ -19,6 +21,18 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         get() = state.autoSend
         set(value) {
             state.autoSend = value
+        }
+
+    var mode: RecordingMode
+        get() = state.mode
+        set(value) {
+            state.mode = value
+        }
+
+    var soundEnabled: Boolean
+        get() = state.soundEnabled
+        set(value) {
+            state.soundEnabled = value
         }
 
     override fun getState(): State = state

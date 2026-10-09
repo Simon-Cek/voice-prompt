@@ -2,8 +2,10 @@ package com.example.copilotvoice.actions
 
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.audio.AudioCapture
+import com.example.copilotvoice.audio.Beeps
 import com.example.copilotvoice.audio.WavFile
 import com.example.copilotvoice.settings.CopilotVoiceSettings
+import com.example.copilotvoice.settings.RecordingMode
 import com.example.copilotvoice.sink.ChatSinkChain
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
@@ -31,7 +33,7 @@ class PushToTalkAction : AnAction() {
 
     override fun actionPerformed(event: AnActionEvent) {
         PttState.ensureKeyWatcherInstalled()
-        if (!PttState.isRecording) PttState.start(event.project)
+        PttState.onShortcutPressed(event.project)
     }
 
     private object PttState {
@@ -39,9 +41,6 @@ class PushToTalkAction : AnAction() {
         const val NOTIFICATION_GROUP_ID = "CopilotVoice"
 
         private val log = Logger.getInstance(PushToTalkAction::class.java)
-
-        private val MODIFIER_MASK = InputEvent.SHIFT_MASK or
-            InputEvent.CTRL_MASK or InputEvent.META_MASK or InputEvent.ALT_MASK
 
         private val capture = AudioCapture().also { it.onMaxDurationReached = { stop(activeProject()) } }
         @Volatile private var watcherInstalled = false
@@ -68,15 +67,13 @@ class PushToTalkAction : AnAction() {
         private fun onKeyPressed(e: KeyEvent) {
             val wasDown = downKeys[e.keyCode] ?: 0
             downKeys[e.keyCode] = wasDown + 1
-            if (wasDown > 0) return
-            val shortcut = currentShortcut() ?: return
-            if (matches(shortcut, e) && !isRecording) start(activeProject())
         }
 
         private fun onKeyReleased(e: KeyEvent) {
             downKeys[e.keyCode]?.let { count ->
                 if (count <= 1) downKeys.remove(e.keyCode) else downKeys[e.keyCode] = count - 1
             }
+            if (CopilotVoiceSettings.instance.mode != RecordingMode.HOLD) return
             val shortcut = currentShortcut() ?: return
             if (isRecording && !comboStillHeld(shortcut)) stop(activeProject())
         }
@@ -86,13 +83,6 @@ class PushToTalkAction : AnAction() {
         private fun currentShortcut(): KeyboardShortcut? =
             ActionManager.getInstance().getAction(ACTION_ID)?.shortcutSet?.shortcuts
                 ?.filterIsInstance<KeyboardShortcut>()?.firstOrNull()
-
-        private fun matches(shortcut: KeyboardShortcut, e: KeyEvent): Boolean {
-            val stroke = shortcut.firstKeyStroke ?: return false
-            if (e.keyCode != stroke.keyCode) return false
-            val pressed = e.modifiers and MODIFIER_MASK
-            return (pressed and stroke.modifiers) == stroke.modifiers
-        }
 
         private fun comboStillHeld(shortcut: KeyboardShortcut): Boolean {
             val stroke = shortcut.firstKeyStroke ?: return false
@@ -107,6 +97,13 @@ class PushToTalkAction : AnAction() {
 
         private fun isDown(vararg codes: Int): Boolean = codes.any { (downKeys[it] ?: 0) > 0 }
 
+        fun onShortcutPressed(project: Project?) {
+            when (CopilotVoiceSettings.instance.mode) {
+                RecordingMode.TAP -> if (isRecording) stop(project) else start(project)
+                RecordingMode.HOLD -> if (!isRecording) start(project)
+            }
+        }
+
         fun start(project: Project?) {
             try {
                 capture.start()
@@ -114,10 +111,12 @@ class PushToTalkAction : AnAction() {
                 notify(project, VoiceBundle.message("notification.mic.open.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                 return
             }
+            if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStart()
             listeningNotification = notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)
         }
 
         fun stop(project: Project?) {
+            if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
             dismissListening()
             val samples = capture.stop()
             if (samples.isEmpty()) return

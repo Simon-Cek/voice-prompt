@@ -17,7 +17,7 @@
         <notificationGroup id="CopilotVoice" displayType="BALLOON"/>
 
         <applicationService serviceImplementation="com.example.copilotvoice.settings.CopilotVoiceSettings"/>
-        <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" instance="com.example.copilotvoice.settings.CopilotVoiceConfigurable"/>
+        <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" key="settings.title" instance="com.example.copilotvoice.settings.CopilotVoiceConfigurable"/>
     </extensions>
 
     <actions>
