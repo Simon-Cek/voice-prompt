@@ -1,10 +1,11 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
     <id>com.example.copilotvoice</id>
-    <name>Copilot Voice</name>
+    <name>Copilot Voice for Windows</name>
     <vendor>Simon Cek</vendor>
     <description><![CDATA[
-        <p>Voice input for GitHub Copilot Chat in IntelliJ-based IDEs. Hold a shortcut, speak, release — your words land in the Copilot chat, transcribed locally with whisper.cpp.</p>
+        <p>Voice-to-text for GitHub Copilot Chat, built for heavily restricted Windows devices. Hold a shortcut, speak, release — your words are transcribed locally with a bundled whisper.cpp and dropped into the Copilot chat.</p>
+        <p>Made for locked-down machines where Windows built-in dictation is blocked and you can't build whisper.cpp from source: everything (prebuilt binaries + model) ships inside the plugin — no compiler, no admin rights, no network installs.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -14,6 +15,9 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup id="CopilotVoice" displayType="BALLOON"/>
+
+        <applicationService serviceImplementation="com.example.copilotvoice.settings.CopilotVoiceSettings"/>
+        <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" instance="com.example.copilotvoice.settings.CopilotVoiceConfigurable"/>
     </extensions>
 
     <actions>

@@ -3,6 +3,7 @@ package com.example.copilotvoice.actions
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.audio.AudioCapture
 import com.example.copilotvoice.audio.WavFile
+import com.example.copilotvoice.settings.CopilotVoiceSettings
 import com.example.copilotvoice.sink.ChatSinkChain
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
@@ -163,7 +164,7 @@ class PushToTalkAction : AnAction() {
             ApplicationManager.getApplication().invokeLater {
                 try {
                     log.info("deliverToChat on EDT: inserting ${text.length} chars")
-                    val result = chatSink.insert(project, text, autoSend = false)
+                    val result = chatSink.insert(project, text, autoSend = CopilotVoiceSettings.instance.autoSend)
                     if (result.isSuccess) {
                         log.info("deliverToChat: sink insert succeeded")
                     } else {
