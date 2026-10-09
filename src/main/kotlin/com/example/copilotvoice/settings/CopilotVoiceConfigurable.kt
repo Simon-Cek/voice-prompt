@@ -46,6 +46,7 @@ class CopilotVoiceConfigurable : Configurable {
     private val processingCombo = JComboBox<String>()
     private val processingHint = JLabel("")
     private val languageCombo = JComboBox<String>()
+    private val languageHint = JLabel("")
     private val threadsSpinner = JSpinner()
     private val threadsHint = JLabel("")
     private val downloadButton = JButton(VoiceBundle["model.download"])
@@ -70,6 +71,7 @@ class CopilotVoiceConfigurable : Configurable {
             add(tapRadio)
         }
         availableCombo.addActionListener { updateModelButtons() }
+        activeCombo.addActionListener { updateLanguageForModel() }
         downloadButton.addActionListener { downloadSelectedModel() }
         deleteButton.addActionListener { deleteSelectedModel() }
         for (mode in ProcessingMode.values()) processingCombo.addItem(processingLabel(mode))
@@ -145,6 +147,20 @@ class CopilotVoiceConfigurable : Configurable {
         return WhisperLanguage.values().getOrElse(idx) { WhisperLanguage.AUTO }.code
     }
 
+    /**
+     * Locks the language picker to English while the active model is English-only (whisper `.en`),
+     * and unlocks it when a multilingual model is active, when the spoken language can be chosen.
+     */
+    private fun updateLanguageForModel() {
+        val id = selectedActiveId()
+        val englishOnly = id == null || ModelManager.isEnglishOnly(id)
+        languageCombo.isEnabled = !englishOnly
+        languageHint.text = if (englishOnly) VoiceBundle["language.englishOnly.hint"] else VoiceBundle["language.multilingual.hint"]
+        if (englishOnly) {
+            languageCombo.selectedIndex = WhisperLanguage.values().indexOf(WhisperLanguage.ENGLISH)
+        }
+    }
+
     private fun selectedThreads(): Int = (threadsSpinner.value as? Number)?.toInt() ?: 0
 
     /** The stored threads, or the max physical core count when unset (0). */
@@ -213,6 +229,7 @@ class CopilotVoiceConfigurable : Configurable {
             ?: activeIds.firstOrNull { it != NO_MODEL }
         activeCombo.selectedIndex = activeIds.indexOf(chosen).coerceAtLeast(0)
         updateModelButtons()
+        updateLanguageForModel()
     }
 
     /** Enables download/delete for the currently selected available model. */
@@ -355,6 +372,7 @@ class CopilotVoiceConfigurable : Configurable {
             .addLabeledComponent(VoiceBundle["processing.title"], processingCombo)
             .addComponent(processingHint)
             .addLabeledComponent(VoiceBundle["language.title"], languageCombo)
+            .addComponent(languageHint)
             .addLabeledComponent(VoiceBundle["threads.title"], threadsRow)
             .panel
     }

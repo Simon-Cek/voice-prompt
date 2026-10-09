@@ -118,3 +118,18 @@ class WhisperLanguageTest {
         assertEquals("es", args[args.indexOf("-l") + 1])
     }
 }
+
+class ModelManagerTest {
+
+    @Test
+    fun `english-only models are flagged by the en suffix`() {
+        assertTrue(ModelManager.isEnglishOnly("base.en"))
+        assertTrue(ModelManager.isEnglishOnly("tiny.en"))
+    }
+
+    @Test
+    fun `multilingual models are not english-only`() {
+        assertFalse(ModelManager.isEnglishOnly("base"))
+        assertFalse(ModelManager.isEnglishOnly("small"))
+    }
+}

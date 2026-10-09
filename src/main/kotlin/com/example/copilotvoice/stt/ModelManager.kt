@@ -27,6 +27,9 @@ object ModelManager {
 
     fun isInstalled(modelName: String): Boolean = Files.isRegularFile(modelFile(modelName))
 
+    /** Whisper `*.en` models are trained English-only; every other id is multilingual. */
+    fun isEnglishOnly(modelId: String): Boolean = modelId.endsWith(".en")
+
     fun modelsDir(): Path = Paths.get(PathManager.getSystemPath(), "copilot-voice", "models")
 
     fun modelFile(modelName: String): Path = modelsDir().resolve("ggml-$modelName.bin")

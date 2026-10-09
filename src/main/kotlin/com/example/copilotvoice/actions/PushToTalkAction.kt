@@ -11,6 +11,7 @@ import com.example.copilotvoice.sink.ChatSinkChain
 import com.example.copilotvoice.sink.CopilotVersion
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
+import com.example.copilotvoice.stt.WhisperLanguage
 import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationGroupManager
@@ -148,7 +149,8 @@ class PushToTalkAction : AnAction() {
         }
 
         private fun transcribeInBackground(project: Project?, wavFile: File) {
-            val model = ModelManager.resolveActive(null, CopilotVoiceSettings.instance.modelName)
+            val modelName = CopilotVoiceSettings.instance.modelName
+            val model = ModelManager.resolveActive(null, modelName)
             if (model == null) {
                 log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
                 notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
@@ -156,10 +158,11 @@ class PushToTalkAction : AnAction() {
                 return
             }
             log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
+            val language = if (ModelManager.isEnglishOnly(modelName)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
                     try {
-                        val text = WhisperCliEngine().transcribe(wavFile, model, language = CopilotVoiceSettings.instance.language, useGpu = useGpu(), threads = threads())
+                        val text = WhisperCliEngine().transcribe(wavFile, model, language = language, useGpu = useGpu(), threads = threads())
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
                             notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
