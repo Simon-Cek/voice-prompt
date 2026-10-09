@@ -187,10 +187,10 @@ class PushToTalkAction : AnAction() {
             }
         }
 
-        /** CPU threads for whisper: the user's setting, or the recommended physical core count. */
+        /** CPU threads for whisper: the user's setting, or the max physical core count. */
         private fun threads(): Int {
             val set = CopilotVoiceSettings.instance.threads
-            return if (set > 0) set else WhisperRuntime.recommendedThreads()
+            return if (set > 0) set else WhisperRuntime.physicalThreads()
         }
 
         private fun deliverToChat(project: Project?, text: String) {

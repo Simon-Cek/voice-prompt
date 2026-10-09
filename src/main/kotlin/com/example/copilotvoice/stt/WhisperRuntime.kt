@@ -151,12 +151,12 @@ object WhisperRuntime {
     fun availableThreads(): Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
 
     /**
-     * Suggested CPU thread count for whisper: the physical core count, i.e. logical threads divided
-     * by threads-per-core (SMT). Hyperthreads share execution units, so for the compute-bound
-     * matmuls the physical core count is the sensible default. Falls back to the logical count when
+     * Maximum CPU threads for whisper: the physical core count, i.e. logical threads divided by
+     * threads-per-core (SMT). Hyperthreads share execution units, so for the compute-bound matmuls the
+     * physical core count is the ceiling whisper benefits from. Falls back to the logical count when
      * threads-per-core can't be detected.
      */
-    fun recommendedThreads(): Int = (availableThreads() / threadsPerCore()).coerceIn(1, availableThreads())
+    fun physicalThreads(): Int = (availableThreads() / threadsPerCore()).coerceIn(1, availableThreads())
 
     /** Threads per physical core (2 with SMT, 1 without), best-effort per OS. */
     private fun threadsPerCore(): Int = try {

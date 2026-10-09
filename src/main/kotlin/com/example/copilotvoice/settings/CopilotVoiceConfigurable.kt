@@ -74,9 +74,9 @@ class CopilotVoiceConfigurable : Configurable {
         deleteButton.addActionListener { deleteSelectedModel() }
         for (mode in ProcessingMode.values()) processingCombo.addItem(processingLabel(mode))
         for (lang in WhisperLanguage.values()) languageCombo.addItem(lang.displayName)
-        val maxThreads = WhisperRuntime.availableThreads()
+        val maxThreads = WhisperRuntime.physicalThreads()
         threadsSpinner.model = SpinnerNumberModel(
-            WhisperRuntime.recommendedThreads().coerceIn(1, maxThreads), 1, maxThreads, 1,
+            maxThreads, 1, maxThreads, 1,
         )
         refreshModels()
     }
@@ -120,9 +120,9 @@ class CopilotVoiceConfigurable : Configurable {
         processingCombo.selectedItem = processingLabel(s.processingMode)
         languageCombo.selectedIndex = WhisperLanguage.values().indexOf(WhisperLanguage.fromCode(s.language))
         processingHint.text = if (WhisperRuntime.gpuBackendAvailable()) "" else VoiceBundle["processing.gpu.hint"]
-        val maxThreads = WhisperRuntime.availableThreads()
+        val maxThreads = WhisperRuntime.physicalThreads()
         (threadsSpinner.model as SpinnerNumberModel).setValue(effectiveThreads(s).coerceIn(1, maxThreads))
-        threadsHint.text = VoiceBundle.message("threads.hint", WhisperRuntime.availableThreads(), WhisperRuntime.recommendedThreads())
+        threadsHint.text = VoiceBundle.message("threads.hint", maxThreads)
         refreshModels()
     }
 
@@ -147,9 +147,9 @@ class CopilotVoiceConfigurable : Configurable {
 
     private fun selectedThreads(): Int = (threadsSpinner.value as? Number)?.toInt() ?: 0
 
-    /** The stored threads, or the recommended physical core count when unset (0). */
+    /** The stored threads, or the max physical core count when unset (0). */
     private fun effectiveThreads(s: CopilotVoiceSettings): Int =
-        if (s.threads > 0) s.threads else WhisperRuntime.recommendedThreads()
+        if (s.threads > 0) s.threads else WhisperRuntime.physicalThreads()
 
     /** The model id backing the currently selected "available" row, or null. */
     private fun selectedAvailableId(): String? {

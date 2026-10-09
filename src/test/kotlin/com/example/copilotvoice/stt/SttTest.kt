@@ -88,11 +88,11 @@ class WhisperCliEngineTest {
 class WhisperRuntimeThreadsTest {
 
     @Test
-    fun `recommended threads stay within the available range`() {
-        val available = WhisperRuntime.availableThreads()
-        val recommended = WhisperRuntime.recommendedThreads()
-        assertTrue("recommended >= 1", recommended >= 1)
-        assertTrue("recommended <= available ($recommended <= $available)", recommended <= available)
+    fun `physical threads stay within the logical range`() {
+        val logical = WhisperRuntime.availableThreads()
+        val physical = WhisperRuntime.physicalThreads()
+        assertTrue("physical >= 1", physical >= 1)
+        assertTrue("physical <= logical ($physical <= $logical)", physical <= logical)
     }
 }
 
