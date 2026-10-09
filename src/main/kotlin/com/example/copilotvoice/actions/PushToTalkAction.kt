@@ -158,7 +158,7 @@ class PushToTalkAction : AnAction() {
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
                     try {
-                        val text = WhisperCliEngine().transcribe(wavFile, model, useGpu = useGpu(), threads = threads())
+                        val text = WhisperCliEngine().transcribe(wavFile, model, language = CopilotVoiceSettings.instance.language, useGpu = useGpu(), threads = threads())
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
                             notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)

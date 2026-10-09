@@ -2,6 +2,7 @@ package com.example.copilotvoice.settings
 
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.stt.ModelManager
+import com.example.copilotvoice.stt.WhisperLanguage
 import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
@@ -44,6 +45,7 @@ class CopilotVoiceConfigurable : Configurable {
     private val activeCombo = JComboBox<String>()
     private val processingCombo = JComboBox<String>()
     private val processingHint = JLabel("")
+    private val languageCombo = JComboBox<String>()
     private val threadsSpinner = JSpinner()
     private val threadsHint = JLabel("")
     private val downloadButton = JButton(VoiceBundle["model.download"])
@@ -71,6 +73,7 @@ class CopilotVoiceConfigurable : Configurable {
         downloadButton.addActionListener { downloadSelectedModel() }
         deleteButton.addActionListener { deleteSelectedModel() }
         for (mode in ProcessingMode.values()) processingCombo.addItem(processingLabel(mode))
+        for (lang in WhisperLanguage.values()) languageCombo.addItem(lang.displayName)
         val maxThreads = WhisperRuntime.availableThreads()
         threadsSpinner.model = SpinnerNumberModel(
             WhisperRuntime.recommendedThreads().coerceIn(1, maxThreads), 1, maxThreads, 1,
@@ -90,6 +93,7 @@ class CopilotVoiceConfigurable : Configurable {
             selectedInputDevice() != s.inputDevice ||
             selectedActiveId() != s.modelName ||
             selectedProcessing() != s.processingMode ||
+            selectedLanguage() != s.language ||
             selectedThreads() != effectiveThreads(s)
     }
 
@@ -101,6 +105,7 @@ class CopilotVoiceConfigurable : Configurable {
         s.inputDevice = selectedInputDevice()
         selectedActiveId()?.let { s.modelName = it }
         s.processingMode = selectedProcessing()
+        s.language = selectedLanguage()
         s.threads = selectedThreads()
     }
 
@@ -113,6 +118,7 @@ class CopilotVoiceConfigurable : Configurable {
         soundCheckbox.isSelected = s.soundEnabled
         inputDeviceCombo.selectedItem = if (s.inputDevice == null) SYSTEM_DEFAULT else s.inputDevice
         processingCombo.selectedItem = processingLabel(s.processingMode)
+        languageCombo.selectedIndex = WhisperLanguage.values().indexOf(WhisperLanguage.fromCode(s.language))
         processingHint.text = if (WhisperRuntime.gpuBackendAvailable()) "" else VoiceBundle["processing.gpu.hint"]
         val maxThreads = WhisperRuntime.availableThreads()
         (threadsSpinner.model as SpinnerNumberModel).setValue(effectiveThreads(s).coerceIn(1, maxThreads))
@@ -132,6 +138,11 @@ class CopilotVoiceConfigurable : Configurable {
     private fun selectedProcessing(): ProcessingMode {
         val idx = processingCombo.selectedIndex
         return ProcessingMode.values().getOrElse(idx) { ProcessingMode.AUTOMATIC }
+    }
+
+    private fun selectedLanguage(): String {
+        val idx = languageCombo.selectedIndex
+        return WhisperLanguage.values().getOrElse(idx) { WhisperLanguage.AUTO }.code
     }
 
     private fun selectedThreads(): Int = (threadsSpinner.value as? Number)?.toInt() ?: 0
@@ -343,6 +354,7 @@ class CopilotVoiceConfigurable : Configurable {
             .addLabeledComponent(VoiceBundle["model.active.title"], activeCombo)
             .addLabeledComponent(VoiceBundle["processing.title"], processingCombo)
             .addComponent(processingHint)
+            .addLabeledComponent(VoiceBundle["language.title"], languageCombo)
             .addLabeledComponent(VoiceBundle["threads.title"], threadsRow)
             .panel
     }

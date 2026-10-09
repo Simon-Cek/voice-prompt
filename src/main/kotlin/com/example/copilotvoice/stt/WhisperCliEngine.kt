@@ -14,7 +14,7 @@ class WhisperCliEngine {
 
     class TranscriptionException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
-    fun transcribe(wavFile: File, model: Path, language: String = "en", timeoutMs: Long = DEFAULT_TIMEOUT_MS, useGpu: Boolean = false, threads: Int = 0): String {
+    fun transcribe(wavFile: File, model: Path, language: String = WhisperLanguage.AUTO.code, timeoutMs: Long = DEFAULT_TIMEOUT_MS, useGpu: Boolean = false, threads: Int = 0): String {
         val cli = WhisperRuntime.cliPath()
         val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language, useGpu, threads))
             .withWorkDirectory(WhisperRuntime.runtimeDir(cli))

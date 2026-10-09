@@ -95,3 +95,26 @@ class WhisperRuntimeThreadsTest {
         assertTrue("recommended <= available ($recommended <= $available)", recommended <= available)
     }
 }
+
+class WhisperLanguageTest {
+
+    private val cli: Path = Paths.get("/opt/copilot-voice/runtime/b5454/linux-x64/whisper-cli")
+    private val model: Path = Paths.get("/home/user/.cache/models/ggml-base.en.bin")
+
+    @Test
+    fun `auto is the default detection mode`() {
+        assertEquals("auto", WhisperLanguage.AUTO.code)
+        assertEquals(WhisperLanguage.AUTO, WhisperLanguage.fromCode("auto"))
+    }
+
+    @Test
+    fun `fromCode falls back to auto for unknown codes`() {
+        assertEquals(WhisperLanguage.AUTO, WhisperLanguage.fromCode("xx"))
+    }
+
+    @Test
+    fun `passes the chosen language to the cli`() {
+        val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/a.wav"), model, WhisperLanguage.SPANISH.code)
+        assertEquals("es", args[args.indexOf("-l") + 1])
+    }
+}
