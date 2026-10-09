@@ -10,8 +10,10 @@ import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import javax.sound.sampled.AudioSystem
 import javax.swing.BorderFactory
 import javax.swing.ButtonGroup
+import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JRadioButton
@@ -22,6 +24,12 @@ class CopilotVoiceConfigurable : Configurable {
     private val holdRadio = JRadioButton(VoiceBundle["recordingMode.hold"])
     private val tapRadio = JRadioButton(VoiceBundle["recordingMode.tap"])
     private val soundCheckbox = JBCheckBox(VoiceBundle["sound.enabled"])
+    private val inputDeviceCombo = JComboBox<String>()
+
+    companion object {
+        /** Sentinel combo value representing "use the system default microphone". */
+        private val SYSTEM_DEFAULT = VoiceBundle["settings.input.default"]
+    }
 
     private val panel: JComponent = buildRootPanel()
 
@@ -40,7 +48,8 @@ class CopilotVoiceConfigurable : Configurable {
         val s = CopilotVoiceSettings.instance
         return autoSendCheckbox.isSelected != s.autoSend ||
             selectedMode() != s.mode ||
-            soundCheckbox.isSelected != s.soundEnabled
+            soundCheckbox.isSelected != s.soundEnabled ||
+            selectedInputDevice() != s.inputDevice
     }
 
     override fun apply() {
@@ -48,18 +57,41 @@ class CopilotVoiceConfigurable : Configurable {
         s.autoSend = autoSendCheckbox.isSelected
         s.mode = selectedMode()
         s.soundEnabled = soundCheckbox.isSelected
+        s.inputDevice = selectedInputDevice()
     }
 
     override fun reset() {
         val s = CopilotVoiceSettings.instance
+        rebuildInputDevices()
         autoSendCheckbox.isSelected = s.autoSend
         holdRadio.isSelected = s.mode == RecordingMode.HOLD
         tapRadio.isSelected = s.mode == RecordingMode.TAP
         soundCheckbox.isSelected = s.soundEnabled
+        inputDeviceCombo.selectedItem = if (s.inputDevice == null) SYSTEM_DEFAULT else s.inputDevice
     }
 
     private fun selectedMode(): RecordingMode =
         if (tapRadio.isSelected) RecordingMode.TAP else RecordingMode.HOLD
+
+    /** Capture device name, or null when the "system default" sentinel is selected. */
+    private fun selectedInputDevice(): String? {
+        val sel = inputDeviceCombo.selectedItem as? String
+        return if (sel == SYSTEM_DEFAULT) null else sel
+    }
+
+    /** Repopulate the combo: "system default" first, then every capture (input) mixer. */
+    private fun rebuildInputDevices() {
+        inputDeviceCombo.removeAllItems()
+        inputDeviceCombo.addItem(SYSTEM_DEFAULT)
+        for (info in AudioSystem.getMixerInfo()) {
+            if (AudioSystem.getMixer(info).getTargetLineInfo().isNotEmpty()) {
+                inputDeviceCombo.addItem(info.name)
+            }
+        }
+        if (inputDeviceCombo.selectedItem == null) {
+            inputDeviceCombo.selectedItem = SYSTEM_DEFAULT
+        }
+    }
 
     private fun buildRootPanel(): JComponent {
         val root = JPanel(GridBagLayout())
@@ -105,6 +137,7 @@ class CopilotVoiceConfigurable : Configurable {
             .addComponent(autoSendCheckbox)
             .addComponent(soundCheckbox)
             .addLabeledComponent(VoiceBundle["recordingMode.title"], modePanel)
+            .addLabeledComponent(VoiceBundle["settings.input.title"], inputDeviceCombo)
             .panel
     }
 }

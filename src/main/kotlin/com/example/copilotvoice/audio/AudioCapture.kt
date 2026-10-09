@@ -44,7 +44,12 @@ class AudioCapture(
         if (!recording.compareAndSet(false, true)) {
             throw IllegalStateException("Already recording")
         }
-        val dataLine = openLine(mixerName)
+        val dataLine = try {
+            openLine(mixerName)
+        } catch (t: Throwable) {
+            recording.set(false)
+            throw t
+        }
         buffer.reset()
         line = dataLine
         try {

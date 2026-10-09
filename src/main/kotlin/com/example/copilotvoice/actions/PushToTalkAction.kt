@@ -105,11 +105,26 @@ class PushToTalkAction : AnAction() {
         }
 
         fun start(project: Project?) {
-            try {
-                capture.start()
+            val device = CopilotVoiceSettings.instance.inputDevice
+            val fellBack = try {
+                capture.start(device)
+                false
             } catch (t: Exception) {
-                notify(project, VoiceBundle.message("notification.mic.open.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
-                return
+                if (device == null) {
+                    notify(project, VoiceBundle.message("notification.mic.open.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                    return
+                }
+                log.warn("input device '$device' unavailable; retrying with system default", t)
+                try {
+                    capture.start()
+                } catch (t2: Exception) {
+                    notify(project, VoiceBundle.message("notification.mic.open.failed", t2.message ?: t2.javaClass.simpleName), NotificationType.ERROR)
+                    return
+                }
+                true
+            }
+            if (fellBack) {
+                notify(project, VoiceBundle.message("notification.mic.fallback", device!!), NotificationType.WARNING)
             }
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStart()
             listeningNotification = notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)

@@ -13,6 +13,8 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         var autoSend: Boolean = false
         var mode: RecordingMode = RecordingMode.HOLD
         var soundEnabled: Boolean = true
+        /** Name of the selected capture device, or null for the system default microphone. */
+        var inputDevice: String? = null
     }
 
     private val state = State()
@@ -33,6 +35,12 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         get() = state.soundEnabled
         set(value) {
             state.soundEnabled = value
+        }
+
+    var inputDevice: String?
+        get() = state.inputDevice
+        set(value) {
+            state.inputDevice = value
         }
 
     override fun getState(): State = state
