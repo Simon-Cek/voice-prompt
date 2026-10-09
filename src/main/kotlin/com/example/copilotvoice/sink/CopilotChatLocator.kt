@@ -23,14 +23,49 @@ sealed class ChatInput {
     ) : ChatInput()
 }
 
+/** A strategy for locating the Copilot chat tool window and its text input. */
+interface ChatLocator {
+    fun findToolWindow(project: Project?): ToolWindow?
+    fun findInput(window: ToolWindow): ChatInput?
+}
+
 /**
- * Locates the GitHub Copilot chat tool window and its text input. The exact tool-window id and the
- * input widget type vary across Copilot plugin versions, so discovery is deliberately lenient: a list
- * of candidate ids first, then a title scan; and both Swing and editor-backed inputs are recognised.
+ * Picks the [ChatLocator] for the installed Copilot version and delegates discovery to it. The exact
+ * tool-window id and the input widget type vary across Copilot plugin versions, so a specific version
+ * can register a known-good locator via [resolve]. Until one does, every version uses the lenient
+ * locator that works across the versions we've seen.
  */
 object CopilotChatLocator {
 
     private val log = Logger.getInstance(CopilotChatLocator::class.java)
+
+    fun locator(): ChatLocator = resolve(CopilotVersion.installed())
+
+    /**
+     * Choose a locator for [version]. When a Copilot release breaks injection, add a known-good
+     * locator for it here (e.g. `if (version?.startsWith("1.9") == true) return V19ChatLocator()`);
+     * otherwise the lenient locator handles it.
+     */
+    private fun resolve(version: String?): ChatLocator {
+        // Extension point for version-specific locators.
+        return LenientChatLocator()
+    }
+
+    fun findToolWindow(project: Project?): ToolWindow? = locator().findToolWindow(project)
+
+    fun findInput(window: ToolWindow): ChatInput? {
+        log.info("findInput: copilot=${CopilotVersion.describe()}")
+        return locator().findInput(window)
+    }
+}
+
+/**
+ * Deliberately lenient discovery: a list of candidate tool-window ids first, then a title scan; and
+ * both Swing and editor-backed inputs are recognised. This is the default for every Copilot version.
+ */
+class LenientChatLocator : ChatLocator {
+
+    private val log = Logger.getInstance(LenientChatLocator::class.java)
 
     private val CANDIDATE_IDS = listOf(
         "GitHub Copilot Chat",
@@ -40,7 +75,7 @@ object CopilotChatLocator {
         "copilot",
     )
 
-    fun findToolWindow(project: Project?): ToolWindow? {
+    override fun findToolWindow(project: Project?): ToolWindow? {
         if (project == null) return null
         val manager = ToolWindowManager.getInstance(project)
         for (id in CANDIDATE_IDS) {
@@ -54,7 +89,7 @@ object CopilotChatLocator {
             ?: copilotWindows.firstOrNull()
     }
 
-    fun findInput(window: ToolWindow): ChatInput? {
+    override fun findInput(window: ToolWindow): ChatInput? {
         val root = window.contentManager.contents.firstNotNullOfOrNull { it.component } ?: return null
         log.info("findInput: scanning tool window '${window.title}' (id=${window.id})")
 

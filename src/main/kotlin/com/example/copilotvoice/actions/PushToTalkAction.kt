@@ -8,6 +8,7 @@ import com.example.copilotvoice.settings.CopilotVoiceSettings
 import com.example.copilotvoice.settings.ProcessingMode
 import com.example.copilotvoice.settings.RecordingMode
 import com.example.copilotvoice.sink.ChatSinkChain
+import com.example.copilotvoice.sink.CopilotVersion
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
 import com.example.copilotvoice.stt.WhisperRuntime
@@ -201,14 +202,18 @@ class PushToTalkAction : AnAction() {
                     if (result.isSuccess) {
                         log.info("deliverToChat: sink insert succeeded")
                     } else {
-                        log.warn("deliverToChat: all sinks failed -> balloon", result.exceptionOrNull())
-                        notify(project, text, NotificationType.INFORMATION)
+                        log.warn("deliverToChat: all sinks failed (${CopilotVersion.describe()}) -> balloon", result.exceptionOrNull())
+                        fallbackBalloon(project, text)
                     }
                 } catch (t: Throwable) {
-                    log.error("deliverToChat threw -> balloon", t)
-                    notify(project, text, NotificationType.INFORMATION)
+                    log.error("deliverToChat threw (${CopilotVersion.describe()}) -> balloon", t)
+                    fallbackBalloon(project, text)
                 }
             }
+        }
+
+        private fun fallbackBalloon(project: Project?, text: String) {
+            notify(project, VoiceBundle.message("notification.insert.failed", CopilotVersion.describe()) + text, NotificationType.INFORMATION)
         }
 
         private fun dismissListening() {
