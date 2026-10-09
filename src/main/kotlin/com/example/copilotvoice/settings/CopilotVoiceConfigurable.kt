@@ -2,6 +2,7 @@ package com.example.copilotvoice.settings
 
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.stt.ModelManager
+import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
@@ -25,6 +26,7 @@ import javax.swing.ButtonGroup
 import javax.swing.JButton
 import javax.swing.JComboBox
 import javax.swing.JComponent
+import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JRadioButton
 import javax.swing.JSeparator
@@ -38,6 +40,8 @@ class CopilotVoiceConfigurable : Configurable {
     private val inputDeviceCombo = JComboBox<String>()
     private val availableCombo = JComboBox<String>()
     private val activeCombo = JComboBox<String>()
+    private val processingCombo = JComboBox<String>()
+    private val processingHint = JLabel("")
     private val downloadButton = JButton(VoiceBundle["model.download"])
     private val deleteButton = JButton(VoiceBundle["model.delete"])
 
@@ -62,6 +66,7 @@ class CopilotVoiceConfigurable : Configurable {
         availableCombo.addActionListener { updateModelButtons() }
         downloadButton.addActionListener { downloadSelectedModel() }
         deleteButton.addActionListener { deleteSelectedModel() }
+        for (mode in ProcessingMode.values()) processingCombo.addItem(processingLabel(mode))
         refreshModels()
     }
 
@@ -75,7 +80,8 @@ class CopilotVoiceConfigurable : Configurable {
             selectedMode() != s.mode ||
             soundCheckbox.isSelected != s.soundEnabled ||
             selectedInputDevice() != s.inputDevice ||
-            selectedActiveId() != s.modelName
+            selectedActiveId() != s.modelName ||
+            selectedProcessing() != s.processingMode
     }
 
     override fun apply() {
@@ -85,6 +91,7 @@ class CopilotVoiceConfigurable : Configurable {
         s.soundEnabled = soundCheckbox.isSelected
         s.inputDevice = selectedInputDevice()
         selectedActiveId()?.let { s.modelName = it }
+        s.processingMode = selectedProcessing()
     }
 
     override fun reset() {
@@ -95,11 +102,24 @@ class CopilotVoiceConfigurable : Configurable {
         tapRadio.isSelected = s.mode == RecordingMode.TAP
         soundCheckbox.isSelected = s.soundEnabled
         inputDeviceCombo.selectedItem = if (s.inputDevice == null) SYSTEM_DEFAULT else s.inputDevice
+        processingCombo.selectedItem = processingLabel(s.processingMode)
+        processingHint.text = if (WhisperRuntime.gpuBackendAvailable()) "" else VoiceBundle["processing.gpu.hint"]
         refreshModels()
     }
 
     private fun selectedMode(): RecordingMode =
         if (tapRadio.isSelected) RecordingMode.TAP else RecordingMode.HOLD
+
+    private fun processingLabel(mode: ProcessingMode): String = when (mode) {
+        ProcessingMode.AUTOMATIC -> VoiceBundle["processing.automatic"]
+        ProcessingMode.CPU -> VoiceBundle["processing.cpu"]
+        ProcessingMode.GPU -> VoiceBundle["processing.gpu"]
+    }
+
+    private fun selectedProcessing(): ProcessingMode {
+        val idx = processingCombo.selectedIndex
+        return ProcessingMode.values().getOrElse(idx) { ProcessingMode.AUTOMATIC }
+    }
 
     /** The model id backing the currently selected "available" row, or null. */
     private fun selectedAvailableId(): String? {
@@ -299,6 +319,8 @@ class CopilotVoiceConfigurable : Configurable {
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(VoiceBundle["model.available.title"], availableRow)
             .addLabeledComponent(VoiceBundle["model.active.title"], activeCombo)
+            .addLabeledComponent(VoiceBundle["processing.title"], processingCombo)
+            .addComponent(processingHint)
             .panel
     }
 }

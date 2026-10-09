@@ -132,4 +132,18 @@ object WhisperRuntime {
     }
 
     fun runtimeDir(cli: Path): String = cli.parent.toString()
+
+    /** Whether the bundled whisper build for the current platform ships a Vulkan (GPU) backend. */
+    fun gpuBackendAvailable(): Boolean {
+        val platformDir = when {
+            SystemInfo.isWindows -> "win-x64"
+            SystemInfo.isLinux -> "linux-x64"
+            else -> return false
+        }
+        return try {
+            readSums(platformDir).keys.any { it.contains("vulkan", ignoreCase = true) }
+        } catch (t: Exception) {
+            false
+        }
+    }
 }

@@ -14,9 +14,9 @@ class WhisperCliEngine {
 
     class TranscriptionException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
-    fun transcribe(wavFile: File, model: Path, language: String = "en", timeoutMs: Long = DEFAULT_TIMEOUT_MS): String {
+    fun transcribe(wavFile: File, model: Path, language: String = "en", timeoutMs: Long = DEFAULT_TIMEOUT_MS, useGpu: Boolean = false): String {
         val cli = WhisperRuntime.cliPath()
-        val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language))
+        val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language, useGpu))
             .withWorkDirectory(WhisperRuntime.runtimeDir(cli))
         if (SystemInfo.isLinux || SystemInfo.isMac) {
             commandLine.withEnvironment("LD_LIBRARY_PATH", WhisperRuntime.runtimeDir(cli))
@@ -60,13 +60,17 @@ class WhisperCliEngine {
         return stdout.toString().trim()
     }
 
-    fun buildArguments(cli: Path, wavFile: File, model: Path, language: String): List<String> = listOf(
-        cli.toString(),
-        "-m", model.toString(),
-        "-f", wavFile.absolutePath,
-        "-nt",
-        "-l", language,
-    )
+    fun buildArguments(cli: Path, wavFile: File, model: Path, language: String, useGpu: Boolean = false): List<String> {
+        val base = listOf(
+            cli.toString(),
+            "-m", model.toString(),
+            "-f", wavFile.absolutePath,
+            "-nt",
+            "-l", language,
+        )
+        // whisper.cpp runs on the GPU by default; pass --no-gpu to force CPU-only inference.
+        return if (useGpu) base else base + listOf("--no-gpu")
+    }
 
     companion object {
         const val DEFAULT_TIMEOUT_MS = 120_000L

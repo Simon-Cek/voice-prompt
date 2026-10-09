@@ -5,10 +5,12 @@ import com.example.copilotvoice.audio.AudioCapture
 import com.example.copilotvoice.audio.Beeps
 import com.example.copilotvoice.audio.WavFile
 import com.example.copilotvoice.settings.CopilotVoiceSettings
+import com.example.copilotvoice.settings.ProcessingMode
 import com.example.copilotvoice.settings.RecordingMode
 import com.example.copilotvoice.sink.ChatSinkChain
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperCliEngine
+import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
@@ -156,7 +158,7 @@ class PushToTalkAction : AnAction() {
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
                     try {
-                        val text = WhisperCliEngine().transcribe(wavFile, model)
+                        val text = WhisperCliEngine().transcribe(wavFile, model, useGpu = useGpu())
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
                             notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
@@ -172,6 +174,17 @@ class PushToTalkAction : AnAction() {
                 }
             }
             task.queue()
+        }
+
+        /** Whether to run inference on the GPU for the user's Processing choice. */
+        private fun useGpu(): Boolean {
+            val mode = CopilotVoiceSettings.instance.processingMode
+            return when (mode) {
+                ProcessingMode.CPU -> false
+                // GPU by default in whisper.cpp; we only opt out (CPU) when the user chose CPU or
+                // no Vulkan backend is bundled for this platform.
+                ProcessingMode.GPU, ProcessingMode.AUTOMATIC -> WhisperRuntime.gpuBackendAvailable()
+            }
         }
 
         private fun deliverToChat(project: Project?, text: String) {

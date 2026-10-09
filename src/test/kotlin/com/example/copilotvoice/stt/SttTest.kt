@@ -1,6 +1,8 @@
 package com.example.copilotvoice.stt
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -46,6 +48,7 @@ class WhisperCliEngineTest {
                 "-f", "/tmp/recording.wav",
                 "-nt",
                 "-l", "en",
+                "--no-gpu",
             ),
             WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en"),
         )
@@ -55,5 +58,17 @@ class WhisperCliEngineTest {
     fun `uses the requested language`() {
         val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/a.wav"), model, "de")
         assertEquals("de", args[args.indexOf("-l") + 1])
+    }
+
+    @Test
+    fun `forces cpu with --no-gpu when gpu is disabled`() {
+        val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en", useGpu = false)
+        assertTrue(args.contains("--no-gpu"))
+    }
+
+    @Test
+    fun `omits --no-gpu when gpu is requested`() {
+        val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en", useGpu = true)
+        assertFalse(args.contains("--no-gpu"))
     }
 }
