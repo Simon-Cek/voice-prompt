@@ -1,26 +1,22 @@
 package com.example.copilotvoice.settings
 
-import com.example.copilotvoice.VoiceBundle
 import com.intellij.ui.JBColor
+import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import java.awt.Color
+import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
-import javax.swing.JLabel
+import java.awt.Toolkit
 import javax.swing.SwingConstants
 
-class StatusBadge(status: ModelStatus) : JLabel(
-    when (status) {
-        ModelStatus.ACTIVE -> VoiceBundle["model.status.active"]
-        ModelStatus.INSTALLED -> VoiceBundle["model.status.installed"]
-        ModelStatus.NOT_DOWNLOADED -> VoiceBundle["model.status.notdownloaded"]
-    }
-) {
+class StatusBadge(status: ModelStatus, text: String = status.label) : JBLabel(text) {
     private val badgeColor: JBColor = when (status) {
         ModelStatus.ACTIVE -> JBColor(0x1a7f37, 0x3fb950)
         ModelStatus.INSTALLED -> JBColor(0x6e6e73, 0x48484a)
         ModelStatus.NOT_DOWNLOADED -> JBColor(0x9e9ea2, 0x6e6e73)
+        ModelStatus.DOWNLOADING -> JBColor(0x9e9ea2, 0x6e6e73)
     }
 
     init {
@@ -29,6 +25,14 @@ class StatusBadge(status: ModelStatus) : JLabel(
         border = JBUI.Borders.empty(3, 9)
         horizontalAlignment = SwingConstants.CENTER
         isFocusable = false
+        if (status == ModelStatus.DOWNLOADING) {
+            // Hold the widest label's width so the pill doesn't shrink as the text changes ("Downloading" -> "42%").
+            val height = preferredSize.height
+            val size = Dimension(CONSTANT_WIDTH, height)
+            preferredSize = size
+            minimumSize = size
+            maximumSize = size
+        }
     }
 
     override fun paintComponent(g: Graphics) {
@@ -41,5 +45,17 @@ class StatusBadge(status: ModelStatus) : JLabel(
             g2.dispose()
         }
         super.paintComponent(g)
+    }
+
+    private companion object {
+        /** Widest status label, so every badge (any text, e.g. a live %) is the same width. */
+        val CONSTANT_WIDTH: Int by lazy {
+            val probe = JBLabel("")
+            probe.border = JBUI.Borders.empty(3, 9)
+            val insets = probe.border.getBorderInsets(probe)
+            val metrics = Toolkit.getDefaultToolkit().getFontMetrics(probe.font)
+            val widestText = ModelStatus.values().maxOf { metrics.stringWidth(it.label) }
+            widestText + insets.left + insets.right
+        }
     }
 }

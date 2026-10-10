@@ -1,13 +1,18 @@
 package com.example.copilotvoice.settings
 
+import com.example.copilotvoice.VoiceBundle
+
 /** UI status shown on a model row in the settings panel. */
-enum class ModelStatus {
+enum class ModelStatus(val label: String) {
     /** This model is the one currently used for transcription. */
-    ACTIVE,
+    ACTIVE(VoiceBundle["model.status.active"]),
 
     /** Installed on disk, but not the active model. */
-    INSTALLED,
+    INSTALLED(VoiceBundle["model.status.installed"]),
 
     /** Not installed yet — needs a download. */
-    NOT_DOWNLOADED,
+    NOT_DOWNLOADED(VoiceBundle["model.status.notdownloaded"]),
+
+    /** A download is currently in progress. */
+    DOWNLOADING(VoiceBundle["model.status.downloading"]),
 }

@@ -7,6 +7,7 @@ import com.example.copilotvoice.stt.WhisperLanguage
 import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.observable.properties.AtomicBooleanProperty
 import com.intellij.openapi.options.BoundSearchableConfigurable
@@ -15,6 +16,7 @@ import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.ui.DialogPanel
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.util.Disposer
 import com.intellij.ui.JBColor
 import com.intellij.ui.RoundedLineBorder
 import com.intellij.ui.SimpleListCellRenderer
@@ -53,6 +55,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     private val languageEnabled = AtomicBooleanProperty(!ModelManager.isEnglishOnly(s.modelName))
     private var languageComment: JEditorPane? = null
     private var micComponent: JComponent? = null
+    private val rowsDisposable: Disposable = Disposer.newDisposable()
 
     companion object {
         private val SYSTEM_DEFAULT = VoiceBundle["settings.input.default"]
@@ -60,6 +63,11 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     }
 
     override fun getPreferredFocusedComponent(): JComponent? = micComponent
+
+    override fun disposeUIResources() {
+        Disposer.dispose(rowsDisposable)
+        super.disposeUIResources()
+    }
 
     override fun createPanel(): DialogPanel = panel {
         group(VoiceBundle["settings.dictation"], indent = false) {
@@ -155,8 +163,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         refreshModels()
     }
 
-    private fun refreshModels(preferActiveId: String? = null) {
-        preferActiveId?.let { s.modelName = it }
+    private fun refreshModels() {
         rebuildModelRows()
         syncLanguage()
     }
@@ -178,8 +185,8 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                     isLast = index == options.lastIndex,
                     installedCount = { options.count { ModelManager.isInstalled(it.id) } },
                     onUse = { useModel(option.id) },
-                    onDownload = { downloadModel(option.id) },
                     onDelete = { deleteModel(option.id) },
+                    parentDisposable = rowsDisposable,
                 ),
                 constraints,
             )
@@ -204,35 +211,6 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     private fun languageHint(): String =
         if (ModelManager.isEnglishOnly(s.modelName)) VoiceBundle["language.englishOnly.hint"]
         else VoiceBundle["language.multilingual.hint"]
-
-    private fun downloadModel(id: String) {
-        val task = object : Task.Backgroundable(
-            null,
-            VoiceBundle.message("model.downloading", id),
-            true,
-        ) {
-            override fun run(indicator: ProgressIndicator) {
-                try {
-                    ModelManager.download(id, indicator)
-                    ApplicationManager.getApplication().invokeLater {
-                        refreshModels(preferActiveId = id)
-                        notifyApp(VoiceBundle.message("model.downloaded", id), NotificationType.INFORMATION)
-                    }
-                } catch (t: Throwable) {
-                    ApplicationManager.getApplication().invokeLater {
-                        refreshModels()
-                        if (!indicator.isCanceled) {
-                            notifyApp(
-                                VoiceBundle.message("model.download.failed", t.message ?: t.javaClass.simpleName),
-                                NotificationType.ERROR,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        task.queue()
-    }
 
     private fun deleteModel(id: String) {
         val file = ModelManager.modelFile(id)

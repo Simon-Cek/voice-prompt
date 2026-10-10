@@ -1,8 +1,12 @@
 package com.example.copilotvoice.settings
 
 import com.example.copilotvoice.VoiceBundle
+import com.example.copilotvoice.download.DownloadingActions
+import com.example.copilotvoice.download.ModelDownloadService
 import com.example.copilotvoice.stt.ModelManager
 import com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
 import com.intellij.ui.components.JBLabel
@@ -25,14 +29,20 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 
 class ModelRow(
-    model: ModelManager.ModelOption,
-    private val status: ModelStatus,
+    private val model: ModelManager.ModelOption,
+    private var status: ModelStatus,
     private val isLast: Boolean,
     private val installedCount: () -> Int,
     private val onUse: () -> Unit,
-    private val onDownload: () -> Unit,
     private val onDelete: () -> Unit,
+    private val parentDisposable: Disposable,
 ) : JPanel(GridBagLayout()) {
+
+    private val downloads = ApplicationManager.getApplication().getService(ModelDownloadService::class.java)
+    private var badge: StatusBadge = StatusBadge(status)
+    private val badgeHolder = LeftCenterPanel(badge)
+    private val actions = JPanel(GridBagLayout()).apply { isOpaque = false }
+    private var downloadingUi: DownloadingActions? = null
 
     init {
         isOpaque = false
@@ -45,43 +55,83 @@ class ModelRow(
 
         val name = ModelNameLabel(model.displayName, "${model.id} · ${model.note}")
         val size = JBLabel(model.sizeLabel).apply { fixedSize(JBUI.scale(64), JBUI.scale(44)) }
-        val badgeLabel = StatusBadge(status)
-        val badge = LeftCenterPanel(badgeLabel).apply {
-            fixedSize(BADGE_COLUMN_WIDTH, JBUI.scale(44))
-        }
-        val actions = JPanel(GridBagLayout()).apply {
-            isOpaque = false
-            add(
-                JPanel().apply { isOpaque = false },
-                GridBagConstraints().apply {
-                    weightx = 1.0
-                    fill = GridBagConstraints.HORIZONTAL
-                },
-            )
-            when (status) {
-                ModelStatus.ACTIVE -> add(deleteButton(), buttonConstraints())
-                ModelStatus.INSTALLED -> {
-                    add(useButton(), buttonConstraints())
-                    add(deleteButton(), buttonConstraints())
-                }
-                ModelStatus.NOT_DOWNLOADED -> add(downloadButton(), buttonConstraints())
-            }
-            fixedSize(JBUI.scale(192), JBUI.scale(44))
-        }
+        badgeHolder.fixedSize(BADGE_COLUMN_WIDTH, JBUI.scale(44))
+        actions.fixedSize(JBUI.scale(192), JBUI.scale(44))
 
         add(name, cell(weightX = 1.0, fill = GridBagConstraints.HORIZONTAL, rightInset = 10))
         add(size, cell(rightInset = 10))
-        add(badge, cell(rightInset = 10))
+        add(badgeHolder, cell(rightInset = 10))
         add(actions, cell())
+
+        downloads.addListener(parentDisposable) { id ->
+            if (id == model.id) sync()
+        }
+
+        refresh()
+    }
+
+    private fun effectiveStatus(): ModelStatus =
+        if (downloads.percent(model.id) != null) ModelStatus.DOWNLOADING else status
+
+    private fun sync() {
+        val current = effectiveStatus()
+        if (current == ModelStatus.DOWNLOADING && downloadingUi != null) {
+            val percent = downloads.percent(model.id) ?: -1
+            downloadingUi?.update(percent)
+            badge.text = if (percent >= 0) "$percent%" else ModelStatus.DOWNLOADING.label
+            badgeHolder.relayout()
+        } else {
+            refresh()
+        }
+    }
+
+    private fun refresh() {
+        val current = effectiveStatus()
+        downloadingUi = null
+
+        badge = StatusBadge(current)
+        badgeHolder.setChild(badge)
+
+        actions.removeAll()
+        actions.add(
+            JPanel().apply { isOpaque = false },
+            GridBagConstraints().apply {
+                weightx = 1.0
+                fill = GridBagConstraints.HORIZONTAL
+            },
+        )
+        when (current) {
+            ModelStatus.ACTIVE -> actions.add(deleteButton(), buttonConstraints())
+            ModelStatus.INSTALLED -> {
+                actions.add(useButton(), buttonConstraints())
+                actions.add(deleteButton(), buttonConstraints())
+            }
+            ModelStatus.NOT_DOWNLOADED -> actions.add(downloadButton(), buttonConstraints())
+            ModelStatus.DOWNLOADING -> {
+                downloadingUi = DownloadingActions { downloads.cancel(model.id) }
+                downloadingUi?.update(downloads.percent(model.id) ?: -1)
+                actions.add(downloadingUi!!, buttonConstraints())
+            }
+        }
+        actions.revalidate()
+        actions.repaint()
     }
 
     private fun useButton(): JButton = HoverButton(VoiceBundle["model.use"]).apply {
         addActionListener { onUse() }
     }
 
-    private fun downloadButton(): JButton = HoverButton(VoiceBundle["model.download"]).apply {
-        putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
-        addActionListener { onDownload() }
+    private fun downloadButton(): JButton {
+        val model = this@ModelRow.model
+        return HoverButton(VoiceBundle["model.download"]).apply {
+            putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
+            addActionListener {
+                status = ModelStatus.DOWNLOADING
+                downloads.start(model.id, model.displayName, ModelManager.downloadUrl(model.id)) { success ->
+                    status = if (success) ModelStatus.INSTALLED else ModelStatus.NOT_DOWNLOADED
+                }
+            }
+        }
     }
 
     private fun deleteButton(): JButton = HoverButton(VoiceBundle["model.delete"]).apply {
@@ -254,11 +304,29 @@ private class ModelNameLabel(
     }
 }
 
-private class LeftCenterPanel(private val child: JComponent) : JPanel() {
+private class LeftCenterPanel(initial: JComponent) : JPanel() {
+    private var child: JComponent = initial
+
     init {
         layout = null
         isOpaque = false
-        add(child)
+        add(initial)
+    }
+
+    fun setChild(newChild: JComponent) {
+        remove(child)
+        child = newChild
+        add(newChild)
+        doLayout()
+        revalidate()
+        repaint()
+    }
+
+    /** Re-center the current child after its preferred size changed (e.g. its text). */
+    fun relayout() {
+        doLayout()
+        revalidate()
+        repaint()
     }
 
     override fun doLayout() {
