@@ -2,38 +2,52 @@ package com.example.copilotvoice.settings
 
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
-import javax.swing.BorderFactory
-import javax.swing.JProgressBar
-import javax.swing.JPanel
-
-import java.awt.BorderLayout
+import com.intellij.util.ui.UIUtil
+import java.awt.Dimension
+import java.awt.Graphics
+import java.awt.Graphics2D
+import java.awt.RenderingHints
+import javax.swing.JComponent
 
 /**
- * A thin horizontal bar showing the live microphone input level (0–100).
+ * A thin rounded horizontal bar showing the live microphone input level.
  *
- * The panel is laid out immediately; the actual audio capture that drives
- * [update] is deferred (it requires a live `AudioFormat` on the EDT). Until
- * then the meter simply rests at 0, which is the correct "not recording" state.
- *
- * @property updateLevel called with a new 0–100 level when audio is being measured.
+ * Set [level] between `0.0` and `1.0`, or use [updateLevel] with a `0`–`100` value.
+ * The meter is safe to update from a background thread; the repaint is marshalled to the EDT.
  */
-class LevelMeter : JPanel(BorderLayout(0, 8)) {
-    private val levelBar = JProgressBar(0, 100).apply {
-        isOpaque = true
-        isStringPainted = false
-        foreground = JBColor(0x1a7f37, 0x3fb950)
-        background = JBColor(0xeaeef2, 0x21262d)
-        border = BorderFactory.createEmptyBorder(3, 0, 3, 0)
-    }
+class LevelMeter : JComponent() {
+    var level: Double = 0.0
+        set(value) {
+            field = value.coerceIn(0.0, 1.0)
+            UIUtil.invokeLaterIfNeeded { repaint() }
+        }
 
     init {
         isOpaque = false
-        add(levelBar, BorderLayout.CENTER)
-        border = JBUI.Borders.empty(2, 0)
+        isFocusable = false
+        preferredSize = JBUI.size(120, 6)
+        maximumSize = Dimension(JBUI.scale(120), Integer.MAX_VALUE)
     }
 
-    /** Set the meter level (0–100). No-op while not recording. */
+    /** Set the meter level using the legacy 0–100 scale. */
     fun updateLevel(level: Int) {
-        levelBar.value = level.coerceIn(0, 100)
+        this.level = level / 100.0
+    }
+
+    override fun paintComponent(g: Graphics) {
+        val g2 = g.create() as Graphics2D
+        try {
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g2.color = JBColor.border()
+            g2.fillRoundRect(0, 0, width, height, height, height)
+
+            if (level > 0.0) {
+                g2.color = JBColor(0x4CAF50, 0x5FB865)
+                val filledWidth = (width * level).toInt().coerceAtLeast(height)
+                g2.fillRoundRect(0, 0, filledWidth, height, height, height)
+            }
+        } finally {
+            g2.dispose()
+        }
     }
 }

@@ -16,10 +16,10 @@ object ModelManager {
     data class ModelOption(val id: String, val displayName: String, val sizeLabel: String, val note: String)
 
     val AVAILABLE_MODELS: List<ModelOption> = listOf(
-        ModelOption("tiny.en", "Tiny", "~75 MB", "fastest, least accurate"),
-        ModelOption("base.en", "Base", "~142 MB", "balanced"),
-        ModelOption("small.en", "Small", "~466 MB", "good balance"),
-        ModelOption("medium.en", "Medium", "~1.5 GB", "most accurate, slowest"),
+        ModelOption("tiny.en", "Tiny", "75 MB", "fastest, least accurate"),
+        ModelOption("base.en", "Base", "142 MB", "balanced"),
+        ModelOption("small.en", "Small", "466 MB", "good balance"),
+        ModelOption("medium.en", "Medium", "1.5 GB", "most accurate, slowest"),
     )
 
     fun downloadUrl(modelId: String): String =

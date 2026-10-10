@@ -10,11 +10,6 @@ import java.awt.RenderingHints
 import javax.swing.JLabel
 import javax.swing.SwingConstants
 
-/**
- * A small pill-shaped label indicating a model row's status.
- *
- * @param status the status to display; determines the text and colour.
- */
 class StatusBadge(status: ModelStatus) : JLabel(
     when (status) {
         ModelStatus.ACTIVE -> VoiceBundle["model.status.active"]
