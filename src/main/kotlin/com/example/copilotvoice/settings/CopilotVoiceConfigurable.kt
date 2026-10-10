@@ -127,18 +127,15 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
             }
 
             row(VoiceBundle["threads.title"]) {
-                if (s.threads !in 1..maxThreads) s.threads = maxThreads
-                val valueLabel = JBLabel(s.threads.toString())
-                slider(1, maxThreads, 0, 0)
-                    .bindValue(s::threads)
+                val max = maxThreads.coerceAtLeast(1)
+                val info = JBLabel(VoiceBundle.message("threads.status", s.threads.coerceIn(1, max), max))
+                    .apply { foreground = JBColor.GRAY }
+                slider(1, max, 0, 0)
+                    .bindValue({ s.threads.coerceIn(1, max) }, { s.threads = it })
                     .applyToComponent {
-                        addChangeListener {
-                            valueLabel.text = value.toString()
-                        }
+                        addChangeListener { info.text = VoiceBundle.message("threads.status", value, max) }
                     }
-                cell(valueLabel)
-                label(VoiceBundle.message("threads.of", maxThreads))
-                    .applyToComponent { foreground = JBColor.GRAY }
+                cell(info)
             }.rowComment(VoiceBundle["threads.hint"])
         }
 
