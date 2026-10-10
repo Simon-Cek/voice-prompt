@@ -12,14 +12,14 @@ object ModelManager {
 
     const val DEFAULT_MODEL = "base.en"
 
-    /** A downloadable Whisper model and its approximate download size. */
-    data class ModelOption(val id: String, val displayName: String, val sizeLabel: String)
+    /** A downloadable Whisper model, its approximate size, and a short quality note. */
+    data class ModelOption(val id: String, val displayName: String, val sizeLabel: String, val note: String)
 
     val AVAILABLE_MODELS: List<ModelOption> = listOf(
-        ModelOption("tiny.en", "Tiny", "~75 MB"),
-        ModelOption("base.en", "Base", "~142 MB"),
-        ModelOption("small.en", "Small", "~466 MB"),
-        ModelOption("medium.en", "Medium", "~1.5 GB"),
+        ModelOption("tiny.en", "Tiny", "~75 MB", "fastest, least accurate"),
+        ModelOption("base.en", "Base", "~142 MB", "balanced"),
+        ModelOption("small.en", "Small", "~466 MB", "good balance"),
+        ModelOption("medium.en", "Medium", "~1.5 GB", "most accurate, slowest"),
     )
 
     fun downloadUrl(modelId: String): String =

@@ -1,8 +1,38 @@
 # AGENTS.md
 
-Copilot Voice is an **IntelliJ Platform plugin** (not a standalone app): voice-to-text for
-GitHub Copilot Chat, transcribed locally with whisper.cpp. You "run" it by booting a sandbox
-IDE with the plugin installed via Gradle's `runIde` task.
+You are an expert IntelliJ Platform plugin developer working on **Copilot Voice for Windows**,
+a Kotlin plugin that adds local voice dictation to IntelliJ IDEA. The plugin is an
+**IntelliJ Platform plugin** (not a standalone app): voice-to-text for GitHub Copilot Chat,
+transcribed locally with whisper.cpp. You "run" it by booting a sandbox IDE with the plugin
+installed via Gradle's `runIde` task. Write code the way the IntelliJ Platform team and
+well-maintained JetBrains plugins do.
+
+## Principles
+
+- **Use the Kotlin UI DSL (Version 2) for all settings and dialog UI** (`panel { group { row { } } }`). Use Swing layout managers only for small custom components, never for a whole page.
+- **Follow the usual platform patterns**: `BoundSearchableConfigurable` for settings, `PersistentStateComponent` for state, services via `@Service` or `plugin.xml`, actions registered in `plugin.xml`, `Disposable` for anything with a lifetime.
+- **Prefer the standard way over a clever one.** If the platform has a built-in component, extension point or helper for something, use it.
+- **Do not invent APIs.** If you are not sure a class, method or constant exists in the target platform version, say so in a comment above the line. Avoid `.impl.` / `.internal.` packages and `@ApiStatus.Internal` unless there is no alternative, and say why.
+- **Make the smallest change that solves the task.** Don't refactor unrelated code or add dependencies without asking.
+
+## Must-follow rules
+
+1. **Never block the EDT.** Downloads, file I/O, audio capture and inference run in the background (`Task.Backgroundable`, `ProgressManager` or a service-owned coroutine scope). Update Swing only on the EDT.
+2. **Dispose everything.** Audio streams, listeners, threads and native handles are tied to a `Disposable` and released in `dispose()`.
+3. **Theme-aware UI only.** Use `JBColor(light, dark)`, `JBColor.border()`, `JBUI` and theme defaults. No single hardcoded colors, so it works in Light and Dark themes. Use `JBUI.scale()` for pixel values in custom components.
+4. **Bind, don't wire by hand.** Use `bindSelected`, `bindItem`, `bindValue` and `buttonsGroup { }.bind(...)`. Put hints in `.comment(...)` or `.rowComment(...)`, not in extra labels.
+5. **Shortcuts belong in Settings | Keymap.** Register actions in `plugin.xml`. Don't add hotkey fields or "configure shortcut" links to the settings page.
+6. **No OK / Cancel / Apply buttons** on a settings page. The Settings dialog provides them.
+7. **Never use color alone to show state.** Status badges always include text.
+8. **Log with `Logger`, not `println`**, and never log transcribed text or audio.
+
+## UI conventions for this plugin
+
+- Dropdowns use `comboBox(...)` with `.bindItem(...)`. Keep state properties non-null and bind with `toNullableProperty()`. Show enums with a `SimpleListCellRenderer`. Give the dropdowns one `widthGroup`.
+  - *Caveat:* verify `widthGroup` exists in the target platform (2025.3.6.1) before relying on it — it was not present in `app.jar` when checked. If it is unavailable, keep all combos the same width by setting an identical preferred size on each (e.g. `preferredSize = Dimension(250, h)`).
+- **Download is the only blue (primary) button.** Don't hardcode blue. Mark it with `putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)` and add a comment if you aren't sure the constant exists.
+- The **Active** model badge is green, and the others are grey.
+- The Delete button on the active row (or the only installed model) is shown but disabled, with a tooltip.
 
 ## Running the app (use these scripts, not raw `runIde`)
 
@@ -57,3 +87,11 @@ Requires JDK 17+ on `PATH` (the Gradle toolchain resolves the exact version).
 - `src/main/resources/messages/VoiceBundle.properties` — UI strings (add new labels here)
 - `bin/` — the start/stop/status scripts above
 - `.run/` — IntelliJ IDE run configs (Run Plugin / Run Tests / Run Verifications)
+
+## How to respond
+
+- Return complete, compilable files with all imports unless a snippet is requested.
+- State your assumptions and anything you couldn't verify (API names, platform versions).
+- If something is ambiguous, ask one focused question instead of guessing.
+- Don't claim a build or test passed unless you ran it (`./gradlew build`).
+- Keep explanations short. The code and the list of caveats matter most.

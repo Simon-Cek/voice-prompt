@@ -1,91 +1,135 @@
 package com.example.copilotvoice.settings
 
 import com.example.copilotvoice.VoiceBundle
+import com.example.copilotvoice.audio.AudioCapture
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperLanguage
 import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.options.Configurable
+import com.intellij.openapi.options.BoundConfigurable
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.ProjectManager
+import com.intellij.openapi.ui.DialogPanel
 import com.intellij.openapi.ui.Messages
-import com.intellij.ui.components.JBCheckBox
-import com.intellij.util.ui.FormBuilder
-import java.awt.BorderLayout
+import com.intellij.ui.dsl.builder.Align
+import com.intellij.ui.dsl.builder.panel
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
-import java.awt.Insets
 import java.nio.file.Files
 import javax.sound.sampled.AudioSystem
-import javax.swing.BorderFactory
 import javax.swing.ButtonGroup
 import javax.swing.JButton
+import javax.swing.JCheckBox
 import javax.swing.JComboBox
 import javax.swing.JComponent
+import javax.swing.JEditorPane
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JRadioButton
-import javax.swing.JSeparator
-import javax.swing.JSpinner
-import javax.swing.SpinnerNumberModel
+import javax.swing.JSlider
 
-class CopilotVoiceConfigurable : Configurable {
+class CopilotVoiceConfigurable : BoundConfigurable(VoiceBundle["settings.title"]) {
 
-    private val autoSendCheckbox = JBCheckBox(VoiceBundle["settings.auto.send"])
+    // --- controls (created once; arranged in [createPanel]) ---
+    private val autoSendCheckbox = JCheckBox(VoiceBundle["settings.auto.send"])
     private val holdRadio = JRadioButton(VoiceBundle["recordingMode.hold"])
     private val tapRadio = JRadioButton(VoiceBundle["recordingMode.tap"])
-    private val soundCheckbox = JBCheckBox(VoiceBundle["sound.enabled"])
+    private val soundCheckbox = JCheckBox(VoiceBundle["sound.enabled"])
     private val inputDeviceCombo = JComboBox<String>()
-    private val availableCombo = JComboBox<String>()
-    private val activeCombo = JComboBox<String>()
     private val processingCombo = JComboBox<String>()
-    private val processingHint = JLabel("")
     private val languageCombo = JComboBox<String>()
-    private val languageHint = JLabel("")
-    private val threadsSpinner = JSpinner()
-    private val threadsHint = JLabel("")
-    private val downloadButton = JButton(VoiceBundle["model.download"])
-    private val deleteButton = JButton(VoiceBundle["model.delete"])
+    private val processingHint = JLabel("")
+    private var languageHint: JEditorPane? = null
+    private val threadsLabel = JLabel("")
+    private val testButton = JButton(VoiceBundle["settings.mic.test"]).apply { isFocusable = false }
+    private val modelsPanel = JPanel(GridBagLayout())
+    private val maxThreads = WhisperRuntime.physicalThreads()
+    private val threadsSlider = JSlider(1, maxThreads, maxThreads)
 
-    /** Model ids backing the [activeCombo] rows, in the same order; [NO_MODEL] when nothing is installed. */
-    private var activeIds: List<String> = emptyList()
+    /** The model id the user intends to make active (pending until Apply). */
+    private var pendingActiveId: String? = null
 
     companion object {
-        /** Sentinel combo value representing "use the system default microphone". */
         private val SYSTEM_DEFAULT = VoiceBundle["settings.input.default"]
-        /** Sentinel id backing the [activeCombo] placeholder row when nothing is installed. */
-        private const val NO_MODEL = "__none__"
         private const val NOTIFICATION_GROUP_ID = "CopilotVoice"
     }
-
-    private val panel: JComponent = buildRootPanel()
 
     init {
         ButtonGroup().apply {
             add(holdRadio)
             add(tapRadio)
         }
-        availableCombo.addActionListener { updateModelButtons() }
-        activeCombo.addActionListener { updateLanguageForModel() }
-        downloadButton.addActionListener { downloadSelectedModel() }
-        deleteButton.addActionListener { deleteSelectedModel() }
+        testButton.addActionListener { testMic() }
         for (mode in ProcessingMode.values()) processingCombo.addItem(processingLabel(mode))
         for (lang in WhisperLanguage.values()) languageCombo.addItem(lang.displayName)
-        val maxThreads = WhisperRuntime.physicalThreads()
-        threadsSpinner.model = SpinnerNumberModel(
-            maxThreads, 1, maxThreads, 1,
-        )
-        refreshModels()
+        threadsSlider.addChangeListener { updateThreadsLabel() }
+
+        val comboWidth = 250
+        inputDeviceCombo.preferredSize = Dimension(comboWidth, inputDeviceCombo.preferredSize.height)
+        processingCombo.preferredSize = Dimension(comboWidth, processingCombo.preferredSize.height)
+        languageCombo.preferredSize = Dimension(comboWidth, languageCombo.preferredSize.height)
     }
 
-    override fun getDisplayName(): String = VoiceBundle["settings.title"]
+    override fun getPreferredFocusedComponent(): JComponent = inputDeviceCombo
 
-    override fun createComponent(): JComponent = panel
+    override fun createPanel(): DialogPanel = panel {
+        group(VoiceBundle["settings.dictation"]) {
+            row(VoiceBundle["recordingMode.title"]) {
+                cell(
+                    JPanel(FlowLayout(FlowLayout.LEFT, 16, 0)).apply {
+                        isOpaque = false
+                        add(holdRadio)
+                        add(tapRadio)
+                    },
+                )
+            }
+            row {
+                cell(soundCheckbox)
+            }
+            row {
+                cell(autoSendCheckbox)
+                rowComment(VoiceBundle["settings.auto.send.hint"])
+            }
+            row(VoiceBundle["settings.input.title"]) {
+                cell(inputDeviceCombo)
+                cell(testButton)
+                cell(
+                    LevelMeter().apply {
+                        val w = 120
+                        preferredSize = Dimension(w, preferredSize.height)
+                        maximumSize = Dimension(w, Integer.MAX_VALUE)
+                    },
+                )
+            }
+        }
+        group(VoiceBundle["settings.model"]) {
+            row {
+                cell(modelsPanel).align(Align.FILL)
+            }
+            row(VoiceBundle["language.title"]) {
+                val comboCell = cell(languageCombo)
+                comboCell.comment(VoiceBundle["language.englishOnly.hint"])
+                languageHint = comboCell.comment
+            }
+        }
+        group(VoiceBundle["settings.performance"]) {
+            row(VoiceBundle["processing.title"]) {
+                cell(processingCombo)
+            }
+            row {
+                cell(processingHint)
+            }
+            row(VoiceBundle["threads.title"]) {
+                cell(threadsSlider).align(Align.FILL)
+                cell(threadsLabel)
+            }
+        }
+    }
 
     override fun isModified(): Boolean {
         val s = CopilotVoiceSettings.instance
@@ -93,10 +137,10 @@ class CopilotVoiceConfigurable : Configurable {
             selectedMode() != s.mode ||
             soundCheckbox.isSelected != s.soundEnabled ||
             selectedInputDevice() != s.inputDevice ||
-            selectedActiveId() != s.modelName ||
+            pendingActiveId != s.modelName ||
             selectedProcessing() != s.processingMode ||
             selectedLanguage() != s.language ||
-            selectedThreads() != effectiveThreads(s)
+            threadsSlider.value != effectiveThreads(s)
     }
 
     override fun apply() {
@@ -105,10 +149,10 @@ class CopilotVoiceConfigurable : Configurable {
         s.mode = selectedMode()
         s.soundEnabled = soundCheckbox.isSelected
         s.inputDevice = selectedInputDevice()
-        selectedActiveId()?.let { s.modelName = it }
+        s.modelName = pendingActiveId ?: ModelManager.DEFAULT_MODEL
         s.processingMode = selectedProcessing()
         s.language = selectedLanguage()
-        s.threads = selectedThreads()
+        s.threads = threadsSlider.value
     }
 
     override fun reset() {
@@ -118,13 +162,13 @@ class CopilotVoiceConfigurable : Configurable {
         holdRadio.isSelected = s.mode == RecordingMode.HOLD
         tapRadio.isSelected = s.mode == RecordingMode.TAP
         soundCheckbox.isSelected = s.soundEnabled
-        inputDeviceCombo.selectedItem = if (s.inputDevice == null) SYSTEM_DEFAULT else s.inputDevice
-        processingCombo.selectedItem = processingLabel(s.processingMode)
+        inputDeviceCombo.selectedItem = s.inputDevice ?: SYSTEM_DEFAULT
+        processingCombo.selectedIndex = ProcessingMode.values().indexOf(s.processingMode)
         languageCombo.selectedIndex = WhisperLanguage.values().indexOf(WhisperLanguage.fromCode(s.language))
         processingHint.text = if (WhisperRuntime.gpuBackendAvailable()) "" else VoiceBundle["processing.gpu.hint"]
-        val maxThreads = WhisperRuntime.physicalThreads()
-        (threadsSpinner.model as SpinnerNumberModel).setValue(effectiveThreads(s).coerceIn(1, maxThreads))
-        threadsHint.text = VoiceBundle.message("threads.hint", maxThreads)
+        threadsSlider.value = effectiveThreads(s)
+        updateThreadsLabel()
+        pendingActiveId = s.modelName
         refreshModels()
     }
 
@@ -147,39 +191,14 @@ class CopilotVoiceConfigurable : Configurable {
         return WhisperLanguage.values().getOrElse(idx) { WhisperLanguage.AUTO }.code
     }
 
-    /**
-     * Locks the language picker to English while the active model is English-only (whisper `.en`),
-     * and unlocks it when a multilingual model is active, when the spoken language can be chosen.
-     */
-    private fun updateLanguageForModel() {
-        val id = selectedActiveId()
-        val englishOnly = id == null || ModelManager.isEnglishOnly(id)
-        languageCombo.isEnabled = !englishOnly
-        languageHint.text = if (englishOnly) VoiceBundle["language.englishOnly.hint"] else VoiceBundle["language.multilingual.hint"]
-        if (englishOnly) {
-            languageCombo.selectedIndex = WhisperLanguage.values().indexOf(WhisperLanguage.ENGLISH)
-        }
+    private fun updateThreadsLabel() {
+        threadsLabel.text = "${threadsSlider.value} ($maxThreads)"
     }
 
-    private fun selectedThreads(): Int = (threadsSpinner.value as? Number)?.toInt() ?: 0
-
-    /** The stored threads, or the max physical core count when unset (0). */
     private fun effectiveThreads(s: CopilotVoiceSettings): Int =
         if (s.threads > 0) s.threads else WhisperRuntime.physicalThreads()
 
-    /** The model id backing the currently selected "available" row, or null. */
-    private fun selectedAvailableId(): String? {
-        val index = availableCombo.selectedIndex
-        return if (index in ModelManager.AVAILABLE_MODELS.indices) ModelManager.AVAILABLE_MODELS[index].id else null
-    }
-
-    /** The model id backing the currently selected "active" row, or null when none is installed. */
-    private fun selectedActiveId(): String? {
-        val id = activeIds.getOrNull(activeCombo.selectedIndex) ?: return null
-        return if (id == NO_MODEL) null else id
-    }
-
-    /** Capture device name, or null when the "system default" sentinel is selected. */
+    /** The stored device name, or null when the "system default" sentinel is selected. */
     private fun selectedInputDevice(): String? {
         val sel = inputDeviceCombo.selectedItem as? String
         return if (sel == SYSTEM_DEFAULT) null else sel
@@ -199,50 +218,66 @@ class CopilotVoiceConfigurable : Configurable {
         }
     }
 
-    /**
-     * Rebuilds both model combos. "Available" lists the whole catalog with install markers;
-     * "Active" lists only installed models. [preferActiveId] (e.g. a model just downloaded) is
-     * selected as active when installed; otherwise the current active model, then the first
-     * installed one.
-     */
+    // --- speech models (per-row Use / Download / Delete) ---
+
+    private fun statusOf(option: ModelManager.ModelOption): ModelStatus {
+        if (!ModelManager.isInstalled(option.id)) return ModelStatus.NOT_DOWNLOADED
+        return if (option.id == pendingActiveId) ModelStatus.ACTIVE else ModelStatus.INSTALLED
+    }
+
+    private fun useModel(id: String) {
+        if (!ModelManager.isInstalled(id)) return
+        pendingActiveId = id
+        refreshModels()
+    }
+
     private fun refreshModels(preferActiveId: String? = null) {
-        val prevAvailableId = selectedAvailableId()
-        availableCombo.removeAllItems()
-        for (option in ModelManager.AVAILABLE_MODELS) {
-            val label = "${option.displayName} (${option.id}, ${option.sizeLabel})"
-            availableCombo.addItem(if (ModelManager.isInstalled(option.id)) "$label \u2014 installed" else label)
-        }
-        val prevIndex = ModelManager.AVAILABLE_MODELS.indexOfFirst { it.id == prevAvailableId }
-        availableCombo.selectedIndex = if (prevIndex >= 0) prevIndex else 0
-
-        activeCombo.removeAllItems()
-        val installed = ModelManager.AVAILABLE_MODELS.filter { ModelManager.isInstalled(it.id) }
-        activeIds = installed.map { it.id }
-        for (option in installed) activeCombo.addItem("${option.displayName} (${option.id})")
-        if (installed.isEmpty()) {
-            activeIds = listOf(NO_MODEL)
-            activeCombo.addItem(VoiceBundle["model.active.none"])
-        }
-
-        val currentActive = CopilotVoiceSettings.instance.modelName
-        val chosen = (preferActiveId ?: currentActive).takeIf { it in activeIds }
-            ?: activeIds.firstOrNull { it != NO_MODEL }
-        activeCombo.selectedIndex = activeIds.indexOf(chosen).coerceAtLeast(0)
-        updateModelButtons()
+        preferActiveId?.let { pendingActiveId = it }
+        rebuildModelRows()
         updateLanguageForModel()
     }
 
-    /** Enables download/delete for the currently selected available model. */
-    private fun updateModelButtons() {
-        val id = selectedAvailableId()
-        val installed = id != null && ModelManager.isInstalled(id)
-        downloadButton.isEnabled = !installed
-        deleteButton.isEnabled = installed
+    private fun rebuildModelRows() {
+        modelsPanel.removeAll()
+        var y = 0
+        for (option in ModelManager.AVAILABLE_MODELS) {
+            val constraints = GridBagConstraints().apply {
+                gridx = 0
+                gridy = y
+                weightx = 1.0
+                fill = GridBagConstraints.HORIZONTAL
+            }
+            modelsPanel.add(
+                ModelRow(
+                    option,
+                    statusOf(option),
+                    onUse = { useModel(option.id) },
+                    onDownload = { downloadModel(option.id) },
+                    onDelete = { deleteModel(option.id) },
+                ),
+                constraints,
+            )
+            y++
+        }
+        modelsPanel.revalidate()
+        modelsPanel.repaint()
     }
 
-    private fun downloadSelectedModel() {
-        val id = selectedAvailableId() ?: return
-        downloadButton.isEnabled = false
+    /**
+     * Locks the language picker to English while the active model is English-only (whisper `.en`),
+     * and unlocks it when a multilingual model is active, when the spoken language can be chosen.
+     */
+    private fun updateLanguageForModel() {
+        val active = pendingActiveId
+        val englishOnly = active == null || ModelManager.isEnglishOnly(active)
+        languageCombo.isEnabled = !englishOnly
+        languageHint?.text = if (englishOnly) VoiceBundle["language.englishOnly.hint"] else VoiceBundle["language.multilingual.hint"]
+        if (englishOnly) {
+            languageCombo.selectedIndex = WhisperLanguage.values().indexOf(WhisperLanguage.ENGLISH)
+        }
+    }
+
+    private fun downloadModel(id: String) {
         val task = object : Task.Backgroundable(
             null,
             VoiceBundle.message("model.downloading", id),
@@ -271,20 +306,49 @@ class CopilotVoiceConfigurable : Configurable {
         task.queue()
     }
 
-    private fun deleteSelectedModel() {
-        val id = selectedAvailableId() ?: return
+    private fun deleteModel(id: String) {
         val file = ModelManager.modelFile(id)
         if (!Files.isRegularFile(file)) return
         val confirmed = Messages.showYesNoDialog(
-            panel,
+            modelsPanel,
             VoiceBundle.message("model.delete.confirm", id),
             VoiceBundle["model.delete.title"],
             null,
         )
         if (confirmed == Messages.YES) {
             Files.deleteIfExists(file)
+            if (pendingActiveId == id) pendingActiveId = null
             refreshModels()
         }
+    }
+
+    /** Captures ~500 ms from the selected input and reports the peak level as a sanity check. */
+    private fun testMic() {
+        val deviceName = selectedInputDevice()
+        val task = object : Task.Backgroundable(null, VoiceBundle["settings.mic.test"], true) {
+            override fun run(indicator: ProgressIndicator) {
+                val capture = AudioCapture()
+                try {
+                    capture.start(deviceName)
+                    Thread.sleep(500)
+                    val samples = capture.stop()
+                    val peak = samples.maxOfOrNull { kotlin.math.abs(it.toInt()) } ?: 0
+                    val level = (peak * 100 / Short.MAX_VALUE).toInt()
+                    ApplicationManager.getApplication().invokeLater {
+                        notifyApp(VoiceBundle.message("mic.test.ok", level), NotificationType.INFORMATION)
+                    }
+                } catch (t: Throwable) {
+                    runCatching { capture.stop() }
+                    ApplicationManager.getApplication().invokeLater {
+                        notifyApp(
+                            VoiceBundle.message("mic.test.failed", t.message ?: t.javaClass.simpleName),
+                            NotificationType.ERROR,
+                        )
+                    }
+                }
+            }
+        }
+        task.queue()
     }
 
     private fun notifyApp(content: String, type: NotificationType) {
@@ -296,84 +360,5 @@ class CopilotVoiceConfigurable : Configurable {
         } else {
             ApplicationManager.getApplication().invokeLater { notification.notify(project) }
         }
-    }
-
-    private fun buildRootPanel(): JComponent {
-        val root = JPanel(GridBagLayout())
-        root.border = BorderFactory.createEmptyBorder(12, 12, 12, 12)
-        var row = 0
-        root.add(section("General", buildGeneralPanel()), sectionCell(row))
-        row++
-        val separatorCell = GridBagConstraints().apply {
-            gridx = 0
-            gridy = row
-            weightx = 1.0
-            fill = GridBagConstraints.HORIZONTAL
-            insets = Insets(4, 0, 12, 0)
-        }
-        root.add(JSeparator(), separatorCell)
-        row++
-        root.add(section("Model", buildModelPanel()), sectionCell(row))
-        row++
-        // Absorb leftover vertical space so the sections stay pinned to the top instead of centering.
-        val filler = JPanel().apply { preferredSize = Dimension(0, 0) }
-        val fillerCell = GridBagConstraints().apply {
-            gridx = 0
-            gridy = row
-            weighty = 1.0
-            fill = GridBagConstraints.VERTICAL
-        }
-        root.add(filler, fillerCell)
-        return root
-    }
-
-    private fun sectionCell(row: Int) = GridBagConstraints().apply {
-        gridx = 0
-        gridy = row
-        weightx = 1.0
-        fill = GridBagConstraints.HORIZONTAL
-        insets = Insets(0, 0, 12, 0)
-    }
-
-    private fun section(title: String, content: JComponent): JComponent {
-        val panel = JPanel(BorderLayout())
-        val border = BorderFactory.createTitledBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8), title)
-        border.titleFont = border.titleFont.deriveFont(border.titleFont.size2D * 1.5f)
-        panel.border = border
-        panel.add(content, BorderLayout.CENTER)
-        return panel
-    }
-
-    private fun buildGeneralPanel(): JComponent {
-        val modePanel = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
-        modePanel.add(holdRadio)
-        modePanel.add(tapRadio)
-        return FormBuilder.createFormBuilder()
-            .addComponent(autoSendCheckbox)
-            .addComponent(soundCheckbox)
-            .addLabeledComponent(VoiceBundle["recordingMode.title"], modePanel)
-            .addLabeledComponent(VoiceBundle["settings.input.title"], inputDeviceCombo)
-            .panel
-    }
-
-    private fun buildModelPanel(): JComponent {
-        val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
-        buttons.add(downloadButton)
-        buttons.add(deleteButton)
-        val availableRow = JPanel(BorderLayout(8, 0))
-        availableRow.add(availableCombo, BorderLayout.CENTER)
-        availableRow.add(buttons, BorderLayout.EAST)
-        val threadsRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
-        threadsRow.add(threadsSpinner)
-        threadsRow.add(threadsHint)
-        return FormBuilder.createFormBuilder()
-            .addLabeledComponent(VoiceBundle["model.available.title"], availableRow)
-            .addLabeledComponent(VoiceBundle["model.active.title"], activeCombo)
-            .addLabeledComponent(VoiceBundle["processing.title"], processingCombo)
-            .addComponent(processingHint)
-            .addLabeledComponent(VoiceBundle["language.title"], languageCombo)
-            .addComponent(languageHint)
-            .addLabeledComponent(VoiceBundle["threads.title"], threadsRow)
-            .panel
     }
 }
