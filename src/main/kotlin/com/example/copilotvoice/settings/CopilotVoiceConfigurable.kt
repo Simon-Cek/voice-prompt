@@ -127,9 +127,10 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
             }
 
             row(VoiceBundle["threads.title"]) {
-                val valueLabel = JBLabel(effectiveThreads().toString())
-                slider(1, maxThreads, 1, effectiveThreads())
-                    .bindValue({ effectiveThreads() }, { s.threads = it })
+                if (s.threads !in 1..maxThreads) s.threads = maxThreads
+                val valueLabel = JBLabel(s.threads.toString())
+                slider(1, maxThreads, 0, 0)
+                    .bindValue(s::threads)
                     .applyToComponent {
                         addChangeListener {
                             valueLabel.text = value.toString()
@@ -301,9 +302,6 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         ProcessingMode.CPU -> VoiceBundle["processing.cpu"]
         ProcessingMode.GPU -> VoiceBundle["processing.gpu"]
     }
-
-    private fun effectiveThreads(): Int =
-        if (s.threads > 0) s.threads.coerceIn(1, maxThreads) else maxThreads
 
     /** "System default" first, then every capture (input) mixer. */
     private fun inputDeviceNames(): List<String> = buildList {
