@@ -16,6 +16,8 @@ import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.RenderingHints
 import java.awt.Toolkit
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JLabel
@@ -57,12 +59,12 @@ class ModelRow(
                 },
             )
             when (status) {
-                ModelStatus.ACTIVE -> add(styled(deleteButton()), buttonConstraints())
+                ModelStatus.ACTIVE -> add(deleteButton(), buttonConstraints())
                 ModelStatus.INSTALLED -> {
-                    add(styled(useButton()), buttonConstraints())
-                    add(styled(deleteButton()), buttonConstraints())
+                    add(useButton(), buttonConstraints())
+                    add(deleteButton(), buttonConstraints())
                 }
-                ModelStatus.NOT_DOWNLOADED -> add(styled(downloadButton()), buttonConstraints())
+                ModelStatus.NOT_DOWNLOADED -> add(downloadButton(), buttonConstraints())
             }
             fixedSize(JBUI.scale(192), JBUI.scale(44))
         }
@@ -73,16 +75,16 @@ class ModelRow(
         add(actions, cell())
     }
 
-    private fun useButton(): JButton = JButton(VoiceBundle["model.use"]).apply {
+    private fun useButton(): JButton = HoverButton(VoiceBundle["model.use"]).apply {
         addActionListener { onUse() }
     }
 
-    private fun downloadButton(): JButton = JButton(VoiceBundle["model.download"]).apply {
+    private fun downloadButton(): JButton = HoverButton(VoiceBundle["model.download"]).apply {
         putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
         addActionListener { onDownload() }
     }
 
-    private fun deleteButton(): JButton = JButton(VoiceBundle["model.delete"]).apply {
+    private fun deleteButton(): JButton = HoverButton(VoiceBundle["model.delete"]).apply {
         when {
             installedCount() <= 1 -> {
                 isEnabled = false
@@ -94,10 +96,6 @@ class ModelRow(
             }
             else -> addActionListener { onDelete() }
         }
-    }
-
-    private fun styled(button: JButton): JButton = button.apply {
-        isFocusable = false
     }
 
     private fun buttonConstraints(): GridBagConstraints = GridBagConstraints().apply {
@@ -129,6 +127,46 @@ class ModelRow(
             val widest = ModelStatus.values().maxOf { StatusBadge(it).preferredSize.width }
             widest + JBUI.scale(8)
         }
+    }
+}
+
+private class HoverButton(text: String) : JButton(text) {
+    private var hovered = false
+
+    init {
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseEntered(e: MouseEvent) {
+                hovered = true
+                repaint()
+            }
+
+            override fun mouseExited(e: MouseEvent) {
+                hovered = false
+                repaint()
+            }
+        })
+    }
+
+    override fun paintComponent(g: Graphics) {
+        super.paintComponent(g)
+        if (hovered && isEnabled) {
+            val g2 = g.create() as Graphics2D
+            try {
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = JBColor(Color(0, 0, 0, 25), Color(255, 255, 255, 30))
+                val inset = JBUI.scale(HOVER_INSET)
+                val arc = JBUI.scale(HOVER_ARC)
+                g2.fillRoundRect(inset, inset, width - inset * 2, height - inset * 2, arc, arc)
+            } finally {
+                g2.dispose()
+            }
+        }
+    }
+
+    private companion object {
+        // Tune these two values in runIde until the highlight sits inside the border.
+        const val HOVER_INSET = 3   // pixels (scaled below)
+        const val HOVER_ARC = 6     // corner diameter (scaled below)
     }
 }
 
