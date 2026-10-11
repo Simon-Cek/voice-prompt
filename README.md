@@ -16,4 +16,4 @@ Requires JDK 17+ on `PATH` (the Gradle toolchain resolves the rest).
 
 ## Status
 
-MVP in progress — see the plan's §4 for scope and acceptance criteria.
+v1.0.0 — released. All MVP acceptance criteria (plan §4) verified in the sandbox IDE against Copilot 1.19.0-252 on IntelliJ IDEA 2025.3.6.1. See [CHANGELOG.md](CHANGELOG.md) for the release notes.
