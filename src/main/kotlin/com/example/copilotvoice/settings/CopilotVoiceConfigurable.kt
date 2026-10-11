@@ -8,6 +8,7 @@ import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.observable.properties.AtomicBooleanProperty
 import com.intellij.openapi.options.BoundSearchableConfigurable
+import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogPanel
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Disposer
@@ -50,6 +51,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     private val levelMeter = LevelMeter()
     private val languageEnabled = AtomicBooleanProperty(!ModelManager.isEnglishOnly(s.modelName))
     private var languageComment: JEditorPane? = null
+    private var languageCell: Cell<ComboBox<String>>? = null
     private var micComponent: JComponent? = null
     private var testButton: JButton? = null
     private var hintCell: Cell<JBLabel>? = null
@@ -145,6 +147,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                     .enabledIf(languageEnabled)
                     .comment(languageHint())
                 languageComment = language.comment
+                languageCell = language
                 syncLanguage()
             }
         }
@@ -235,8 +238,15 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         val englishOnly = ModelManager.isEnglishOnly(s.modelName)
         languageEnabled.set(!englishOnly)
         languageComment?.text = languageHint()
-        if (englishOnly && s.language != WhisperLanguage.ENGLISH.code) {
-            s.language = WhisperLanguage.ENGLISH.code
+        if (englishOnly) {
+            // bindItem only commits the combo to s.language when the dialog is applied, so the combo
+            // may be showing an uncommitted selection (e.g. "Portuguese") while s.language is still
+            // "en". Treat the combo as the current value and reset both the combo and the state.
+            val current = (languageCell?.component?.selectedItem as? String) ?: s.language
+            if (current != WhisperLanguage.ENGLISH.code) {
+                s.language = WhisperLanguage.ENGLISH.code
+                languageCell?.component?.selectedItem = WhisperLanguage.ENGLISH.code
+            }
         }
     }
 
