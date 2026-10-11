@@ -1,12 +1,125 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>com.example.copilotvoice</id>
+    <id>io.github.simon-cek.voiceprompt</id>
     <name>Voice Prompt</name>
-    <vendor>Simon Cek</vendor>
+    <vendor url="https://github.com/Simon-Cek" email="simon.cek94@gmail.com">Simon Cek</vendor>
     <description><![CDATA[
-        <p>Voice-to-text for GitHub Copilot Chat in IntelliJ-based IDEs. Hold a shortcut, speak, release — your words are transcribed locally with a bundled whisper.cpp and dropped into the Copilot chat.</p>
-        <p>Everything (prebuilt binaries + model) ships inside the plugin — no compiler, no admin rights, no network installs. Transcription runs on your machine: no cloud calls by default.</p>
+        <p>
+          <b>Voice Prompt</b> adds <b>voice input to GitHub Copilot Chat in IntelliJ IDEA</b>. Hold a key,
+          speak your prompt, and the text appears in the chat input, ready to review and send.
+          Transcription runs <b>fully on your computer</b> with a bundled Whisper engine, and a small speech
+          model is included, so it works right after installation, with <b>no download and no account</b>.
+          That makes it a good fit for locked-down corporate laptops.
+        </p>
+
+        <h2>Highlights</h2>
+        <ul>
+          <li><b>Works out of the box.</b> The Whisper engine and the Tiny model are part of the plugin. Install it, pick your microphone and start speaking.</li>
+          <li><b>Offline and private.</b> Your voice is transcribed on your machine and never uploaded.</li>
+          <li><b>Built for Copilot Chat.</b> Speak long, detailed prompts instead of typing them. The text is placed straight into the Copilot Chat input for you to read and edit, even if your cursor is still in the editor. By default nothing is sent until you send it.</li>
+          <li><b>Windows and Linux.</b> Supports Windows 10/11 and Linux, both 64-bit (x64). Verified on Ubuntu Linux with PipeWire.</li>
+        </ul>
+
+        <h2>Features</h2>
+        <ul>
+          <li><b>Push-to-talk or tap-to-start/stop.</b> Hold the shortcut to speak, or tap once to start and again to stop. The default shortcut is <code>Alt+Shift+Z</code>, and you can change it in <em>Settings | Keymap</em>.</li>
+          <li><b>Five speech models to choose from.</b> Start with the bundled one, and download a more accurate model if you want it:
+            <ul>
+              <li><b>Tiny</b> (English, 75 MB): bundled, the fastest, and the least accurate.</li>
+              <li><b>Base</b> (English, 142 MB): quick and fairly accurate.</li>
+              <li><b>Small</b> (English, 466 MB): the best balance, recommended for most people.</li>
+              <li><b>Small</b> (multilingual, 466 MB): balanced accuracy for other languages.</li>
+              <li><b>Large v3 Turbo</b> (multilingual, about 1.6 GB): the most accurate, and slower.</li>
+            </ul>
+          </li>
+          <li><b>Language selection.</b> Choose the language you speak when a multilingual model is active. English-only models don't need it, and the setting tells you why it is unavailable.</li>
+          <li><b>CPU or GPU.</b> Automatic mode picks what works on your machine. You can also choose CPU only or GPU (Vulkan), and set the number of CPU threads to balance speed and load.</li>
+          <li><b>Microphone test.</b> Pick your input device and check it with a live level meter before you start dictating.</li>
+          <li><b>Optional auto-send.</b> Off by default, so you always get a chance to check the text first.</li>
+          <li><b>Easy model management.</b> Downloads run in the background with a progress bar and a cancel button, and the bundled model can be restored in one click if you delete it.</li>
+        </ul>
+
+        <h2>Getting started</h2>
+        <ol>
+          <li>Install the plugin and open <em>Settings | Tools | Voice Prompt</em>.</li>
+          <li>Choose your microphone and press <em>Test</em> to check the level.</li>
+          <li>Open Copilot Chat.</li>
+          <li>Hold <code>Alt+Shift+Z</code> (the default shortcut), speak, and release. Check the text, then send it as usual.</li>
+        </ol>
+        <p>
+          The bundled Tiny model is selected at first. If you want better accuracy, open the settings and
+          download another model.
+        </p>
+
+        <h2>Offline use and downloads</h2>
+        <p>
+          Dictation with the bundled model needs <b>no internet connection at all</b>. Internet access is only used
+          if you choose to download one of the larger models from the settings page, and after the download that
+          model also works offline. Larger models come from the whisper.cpp repository on Hugging Face
+          (ggerganov/whisper.cpp) and are checked against its published checksums where available. If your network
+          blocks huggingface.co, the bundled Tiny model still works.
+        </p>
+
+        <h2>What stays on your computer, and what doesn't</h2>
+        <p>
+          Your <b>voice audio</b> is transcribed locally and is never uploaded. When you send the resulting
+          <b>text</b> to Copilot Chat, it is handled by GitHub Copilot under GitHub's own terms and privacy
+          policy, just like anything you type into the chat. This plugin does not change that.
+        </p>
+
+        <h2>Requirements</h2>
+        <ul>
+          <li>Windows 10/11 or Linux, 64-bit (x64) only. macOS, ARM and 32-bit systems are not supported.</li>
+          <li>IntelliJ IDEA 2024.2 or later, with the GitHub Copilot plugin installed and signed in. Dictation into Copilot Chat was tested with Copilot plugin version 1.19.0-252. Voice Prompt was tested with IntelliJ IDEA. It uses only the common IntelliJ Platform, so it should also work in other IntelliJ-based IDEs that run the Copilot plugin, but those have not been tested.</li>
+          <li>An active GitHub Copilot subscription. It is not included with this plugin.</li>
+          <li>A working microphone. On Linux, the microphone must be available through your system's audio setup. Tested with PipeWire.</li>
+          <li>For GPU mode: a Vulkan-capable graphics card and driver. If none is found, the plugin falls back to the CPU.</li>
+        </ul>
+
+        <h2>Good to know</h2>
+        <p>
+          Transcription runs on your computer, so speed depends on your hardware and the model you choose.
+          Larger models are more accurate but slower. English-only models are the quickest for English speech
+          but can't transcribe other languages. Inserting text relies on the Copilot Chat input, so a future update
+          to the Copilot plugin could change how it behaves.
+        </p>
+
+        <p>
+          <small>
+            This plugin is an independent project. It is not affiliated with, endorsed by, or sponsored by
+            GitHub, Inc., Microsoft, OpenAI or JetBrains. GitHub and GitHub Copilot are trademarks of GitHub, Inc.
+            Whisper is a speech recognition model released by OpenAI. Voice Prompt is licensed under Apache 2.0.
+            It bundles whisper.cpp and ggml (both MIT) and MIT-licensed OpenAI Whisper model weights.
+          </small>
+        </p>
     ]]></description>
+
+    <change-notes><![CDATA[
+        <h3>1.0.0: first release</h3>
+        <p>
+          Voice input for GitHub Copilot Chat in IntelliJ IDEA, with fully local transcription.
+        </p>
+
+        <ul>
+          <li><b>Dictate into Copilot Chat.</b> Push-to-talk (hold to speak) or tap-to-start/stop. The default shortcut is <code>Alt+Shift+Z</code>, and you can change it in <em>Settings | Keymap</em>.</li>
+          <li><b>Works right after install.</b> The Whisper engine and the Tiny model are bundled, so it runs offline with no download and no account, including on restricted corporate laptops.</li>
+          <li><b>Windows 10/11 and Linux support</b> (64-bit x64).</li>
+          <li><b>Five speech models.</b> Tiny (bundled), Base, Small, Small multilingual and Large v3 Turbo. Download the ones you want from the settings page, with background progress and a cancel button.</li>
+          <li><b>Language selection</b> for multilingual models.</li>
+          <li><b>CPU or GPU processing.</b> Automatic, CPU only, or GPU (Vulkan), plus a CPU threads setting.</li>
+          <li><b>Microphone test</b> with a live level meter.</li>
+          <li><b>Optional auto-send after dictation</b> (off by default).</li>
+          <li><b>Restore bundled model.</b> Delete the Tiny model and bring it back in one click, with no download needed.</li>
+        </ul>
+
+        <h4>Known limitations</h4>
+        <ul>
+          <li>Transcription speed depends on your hardware and the model you choose. Larger models are slower on CPU.</li>
+          <li>English-only models can't transcribe other languages. Pick a multilingual model for those.</li>
+          <li>64-bit x64 only. macOS, ARM and 32-bit systems are not supported.</li>
+          <li>Inserting text into Copilot Chat was tested with GitHub Copilot plugin 1.19.0-252. Other Copilot versions may behave differently.</li>
+        </ul>
+    ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true">com.github.copilot</depends>
@@ -16,13 +129,13 @@
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup id="CopilotVoice" displayType="BALLOON"/>
 
-        <applicationService serviceImplementation="com.example.copilotvoice.settings.CopilotVoiceSettings"/>
-        <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" key="settings.title" instance="com.example.copilotvoice.settings.CopilotVoiceConfigurable"/>
+        <applicationService serviceImplementation="io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings"/>
+        <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" key="settings.title" instance="io.github.simoncek.voiceprompt.settings.CopilotVoiceConfigurable"/>
     </extensions>
 
     <actions>
-        <action id="com.example.copilotvoice.PushToTalk" class="com.example.copilotvoice.actions.PushToTalkAction" text="Voice Prompt: Push to Talk">
-            <keyboard-shortcut first-keystroke="control alt shift D" keymap="$default"/>
+        <action id="io.github.simon-cek.voiceprompt.PushToTalk" class="io.github.simoncek.voiceprompt.actions.PushToTalkAction" text="Voice Prompt: Push to Talk">
+            <keyboard-shortcut first-keystroke="alt shift Z" keymap="$default"/>
         </action>
     </actions>
 </idea-plugin>

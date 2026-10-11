@@ -79,10 +79,10 @@ Requires JDK 17+ on `PATH` (the Gradle toolchain resolves the exact version).
 
 ## Project layout (where things live)
 
-- `src/main/kotlin/com/example/copilotvoice/settings/` — `CopilotVoiceSettings`, `CopilotVoiceConfigurable`, `RecordingMode`
-- `src/main/kotlin/com/example/copilotvoice/actions/PushToTalkAction.kt` — PTT + TAP mode, start/stop, beeps
-- `src/main/kotlin/com/example/copilotvoice/audio/` — `AudioCapture`, `Beeps`, `WavFile`
-- `src/main/kotlin/com/example/copilotvoice/stt/` — `ModelManager`, `WhisperCliEngine`
+- `src/main/kotlin/io/github/simoncek/voiceprompt/settings/` — `CopilotVoiceSettings`, `CopilotVoiceConfigurable`, `RecordingMode`
+- `src/main/kotlin/io/github/simoncek/voiceprompt/actions/PushToTalkAction.kt` — PTT + TAP mode, start/stop, beeps
+- `src/main/kotlin/io/github/simoncek/voiceprompt/audio/` — `AudioCapture`, `Beeps`, `WavFile`
+- `src/main/kotlin/io/github/simoncek/voiceprompt/stt/` — `ModelManager`, `WhisperCliEngine`
 - `src/main/resources/META-INF/plugin.xml` — plugin descriptor (actions, configurable, resource bundle)
 - `src/main/resources/messages/VoiceBundle.properties` — UI strings (add new labels here)
 - `bin/` — the start/stop/status scripts above
