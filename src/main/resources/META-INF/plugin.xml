@@ -17,7 +17,7 @@
           <li><b>Works out of the box.</b> The Whisper engine and the Tiny model are part of the plugin. Install it, pick your microphone and start speaking.</li>
           <li><b>Offline and private.</b> Your voice is transcribed on your machine and never uploaded.</li>
           <li><b>Built for Copilot Chat.</b> Speak long, detailed prompts instead of typing them. The text is placed straight into the Copilot Chat input for you to read and edit, even if your cursor is still in the editor. By default nothing is sent until you send it.</li>
-          <li><b>Windows and Linux.</b> Supports Windows 10/11 and Linux, both 64-bit (x64). Verified on Ubuntu Linux with PipeWire.</li>
+          <li><b>Windows and Linux.</b> Supports Windows 10/11 and Linux, both 64-bit (x64). Verified on Ubuntu Linux with PipeWire and Windows 11.</li>
         </ul>
 
         <h2>Features</h2>
