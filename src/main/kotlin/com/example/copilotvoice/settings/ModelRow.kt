@@ -7,6 +7,8 @@ import com.example.copilotvoice.stt.ModelManager
 import com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.Task
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
 import com.intellij.ui.components.JBLabel
@@ -106,6 +108,7 @@ class ModelRow(
                 actions.add(useButton(), buttonConstraints())
                 actions.add(deleteButton(), buttonConstraints())
             }
+            ModelStatus.BUNDLED -> actions.add(restoreButton(), buttonConstraints())
             ModelStatus.NOT_DOWNLOADED -> actions.add(downloadButton(), buttonConstraints())
             ModelStatus.DOWNLOADING -> {
                 downloadingUi = DownloadingActions { downloads.cancel(model.id) }
@@ -131,6 +134,28 @@ class ModelRow(
                     status = if (success) ModelStatus.INSTALLED else ModelStatus.NOT_DOWNLOADED
                 }
             }
+        }
+    }
+
+    /** Restores the model bundled inside the plugin — instant, no network. */
+    private fun restoreButton(): JButton = HoverButton(VoiceBundle["model.restore"]).apply {
+        putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
+        addActionListener {
+            isEnabled = false
+            text = VoiceBundle["model.restoring"]
+            val task = object : Task.Backgroundable(null, VoiceBundle["model.restoring"], false) {
+                private var success = false
+
+                override fun run(indicator: ProgressIndicator) {
+                    success = ModelManager.installBundledModel() != null
+                }
+
+                override fun onFinished() {
+                    status = if (success) ModelStatus.INSTALLED else ModelStatus.BUNDLED
+                    refresh()
+                }
+            }
+            task.queue()
         }
     }
 

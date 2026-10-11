@@ -118,7 +118,7 @@ object WhisperRuntime {
         return symlinks
     }
 
-    private fun sha256(file: Path): String {
+    internal fun sha256(file: Path): String {
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(file).use { input ->
             val buffer = ByteArray(8192)

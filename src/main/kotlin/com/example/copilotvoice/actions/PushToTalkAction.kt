@@ -149,19 +149,34 @@ class PushToTalkAction : AnAction() {
         }
 
         private fun transcribeInBackground(project: Project?, wavFile: File) {
-            val modelName = CopilotVoiceSettings.instance.modelName
-            val model = ModelManager.resolveActive(null, modelName)
-            if (model == null) {
-                log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
-                notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
-                wavFile.delete()
-                return
-            }
-            log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
-            val language = if (ModelManager.isEnglishOnly(modelName)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
+            val requestedModelId = CopilotVoiceSettings.instance.modelName
+            val resolved = ModelManager.resolveActive(null, requestedModelId)
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
+                    // Resolve the model here, off the EDT: restoring the bundled model copies and
+                    // checksums a ~75 MB file.
+                    var model = resolved
+                    var activeModelId = requestedModelId
+                    if (model == null) {
+                        // The selected model isn't installed (e.g. no network to download it): fall
+                        // back to the model bundled inside the plugin.
+                        val bundled = ModelManager.installBundledModel()
+                        if (bundled != null) {
+                            model = bundled
+                            activeModelId = ModelManager.BUNDLED_MODEL
+                            log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
+                            notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
+                        }
+                    }
+                    if (model == null) {
+                        log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
+                        notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
+                        wavFile.delete()
+                        return
+                    }
                     try {
+                        log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
+                        val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
                         val text = WhisperCliEngine().transcribe(wavFile, model, language = language, useGpu = useGpu(), threads = threads())
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {

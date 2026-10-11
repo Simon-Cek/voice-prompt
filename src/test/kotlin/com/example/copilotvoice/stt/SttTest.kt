@@ -2,10 +2,12 @@ package com.example.copilotvoice.stt
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.security.MessageDigest
 
 class WhisperRuntimeTest {
 
@@ -131,5 +133,29 @@ class ModelManagerTest {
     fun `multilingual models are not english-only`() {
         assertFalse(ModelManager.isEnglishOnly("base"))
         assertFalse(ModelManager.isEnglishOnly("small"))
+    }
+
+    @Test
+    fun `the tiny model ships inside the plugin`() {
+        assertEquals("tiny.en", ModelManager.BUNDLED_MODEL)
+        assertTrue("bundled model resource missing from the classpath", ModelManager.bundledModelAvailable())
+    }
+
+    @Test
+    fun `the bundled model checksum matches the shipped file`() {
+        val expected = ModelManager.bundledSha256()
+        assertNotNull("models/SHA256SUMS must list the bundled model", expected)
+        val resource = javaClass.classLoader.getResourceAsStream("models/ggml-${ModelManager.BUNDLED_MODEL}.bin")
+        assertNotNull("bundled model resource missing", resource)
+        val digest = MessageDigest.getInstance("SHA-256")
+        resource!!.use { input ->
+            val buffer = ByteArray(8192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        assertEquals(expected, digest.digest().joinToString("") { "%02x".format(it) })
     }
 }

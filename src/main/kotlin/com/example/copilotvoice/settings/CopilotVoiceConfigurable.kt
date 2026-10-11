@@ -176,8 +176,14 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     // --- speech models (per-row Use / Download / Delete) ---
 
     private fun statusOf(option: ModelManager.ModelOption): ModelStatus {
-        if (!ModelManager.isInstalled(option.id)) return ModelStatus.NOT_DOWNLOADED
-        return if (option.id == s.modelName) ModelStatus.ACTIVE else ModelStatus.INSTALLED
+        if (ModelManager.isInstalled(option.id)) {
+            return if (option.id == s.modelName) ModelStatus.ACTIVE else ModelStatus.INSTALLED
+        }
+        return if (option.bundled && ModelManager.bundledModelAvailable()) {
+            ModelStatus.BUNDLED
+        } else {
+            ModelStatus.NOT_DOWNLOADED
+        }
     }
 
     private fun useModel(id: String) {

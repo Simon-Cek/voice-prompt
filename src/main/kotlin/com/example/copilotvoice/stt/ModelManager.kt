@@ -3,6 +3,7 @@ package com.example.copilotvoice.stt
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.util.io.HttpRequests
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -12,11 +13,20 @@ object ModelManager {
 
     const val DEFAULT_MODEL = "base.en"
 
+    /** The model that ships inside the plugin jar so dictation works without a network. */
+    const val BUNDLED_MODEL = "tiny.en"
+
     /** A downloadable Whisper model, its approximate size, and a short quality note. */
-    data class ModelOption(val id: String, val displayName: String, val sizeLabel: String, val note: String)
+    data class ModelOption(
+        val id: String,
+        val displayName: String,
+        val sizeLabel: String,
+        val note: String,
+        val bundled: Boolean = false,
+    )
 
     val AVAILABLE_MODELS: List<ModelOption> = listOf(
-        ModelOption("tiny.en", "Tiny", "75 MB", "fastest, least accurate"),
+        ModelOption("tiny.en", "Tiny", "75 MB", "fastest, least accurate", bundled = true),
         ModelOption("base.en", "Base", "142 MB", "balanced"),
         ModelOption("small.en", "Small", "466 MB", "good balance"),
         ModelOption("medium.en", "Medium", "1.5 GB", "most accurate, slowest"),
@@ -73,6 +83,51 @@ object ModelManager {
             return target
         } finally {
             Files.deleteIfExists(part)
+        }
+    }
+
+    // --- bundled model (ships inside the plugin jar, no network needed) ---
+
+    /** Whether the bundled model resource is present on the classpath. */
+    fun bundledModelAvailable(): Boolean =
+        javaClass.classLoader.getResource("models/ggml-$BUNDLED_MODEL.bin") != null
+
+    /** Expected SHA-256 of the bundled model, from `models/SHA256SUMS`. */
+    fun bundledSha256(): String? {
+        var sum: String? = null
+        javaClass.classLoader.getResourceAsStream("models/SHA256SUMS")?.use { input ->
+            input.bufferedReader().forEachLine { line ->
+                val parts = line.trim().split(Regex("\\s+"), limit = 2)
+                if (parts.size == 2 && parts[1] == "ggml-$BUNDLED_MODEL.bin") sum = parts[0].lowercase()
+            }
+        }
+        return sum
+    }
+
+    /**
+     * Makes the bundled model available in the models directory and returns the installed file.
+     * An already-installed copy is kept as-is; otherwise the resource is extracted to a temp file,
+     * checksum-verified, and moved into place — so a failure never leaves a half-installed model.
+     * Returns null when the plugin build ships no bundled model.
+     */
+    fun installBundledModel(): Path? {
+        val target = modelFile(BUNDLED_MODEL)
+        if (Files.isRegularFile(target)) return target
+        if (!bundledModelAvailable()) return null
+        val expected = bundledSha256() ?: return null
+        val resource = javaClass.classLoader.getResourceAsStream("models/ggml-$BUNDLED_MODEL.bin")
+            ?: return null
+        Files.createDirectories(target.parent)
+        val temp = Files.createTempFile(target.parent, "model", ".part")
+        try {
+            resource.use { input -> Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING) }
+            if (WhisperRuntime.sha256(temp) != expected) {
+                throw IOException("Checksum mismatch for bundled model $BUNDLED_MODEL")
+            }
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+            return target
+        } finally {
+            Files.deleteIfExists(temp)
         }
     }
 }

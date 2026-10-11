@@ -10,6 +10,9 @@ enum class ModelStatus(val label: String) {
     /** Installed on disk, but not the active model. */
     INSTALLED(VoiceBundle["model.status.installed"]),
 
+    /** Shipped inside the plugin — can be restored without a network. */
+    BUNDLED(VoiceBundle["model.status.bundled"]),
+
     /** Not installed yet — needs a download. */
     NOT_DOWNLOADED(VoiceBundle["model.status.notdownloaded"]),
 

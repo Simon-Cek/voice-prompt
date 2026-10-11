@@ -15,6 +15,7 @@ class StatusBadge(status: ModelStatus, text: String = status.label) : JBLabel(te
     private val badgeColor: JBColor = when (status) {
         ModelStatus.ACTIVE -> JBColor(0x1a7f37, 0x3fb950)
         ModelStatus.INSTALLED -> JBColor(0x6e6e73, 0x48484a)
+        ModelStatus.BUNDLED -> JBColor(0x6e6e73, 0x48484a)
         ModelStatus.NOT_DOWNLOADED -> JBColor(0x9e9ea2, 0x6e6e73)
         ModelStatus.DOWNLOADING -> JBColor(0x9e9ea2, 0x6e6e73)
     }
