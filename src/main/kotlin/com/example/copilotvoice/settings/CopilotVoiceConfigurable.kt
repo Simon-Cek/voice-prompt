@@ -79,7 +79,9 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     }
 
     override fun createPanel(): DialogPanel = panel {
-        group(VoiceBundle["settings.dictation"], indent = false) {
+        // groupRowsRange, not group(): group() builds its content in a nested panel with an independent grid,
+        // giving each section its own label column; groupRowsRange keeps the rows in the one shared grid.
+        groupRowsRange(VoiceBundle["settings.dictation"], indent = false) {
             buttonsGroup {
                 row(VoiceBundle["recordingMode.title"]) {
                     radioButton(VoiceBundle["recordingMode.hold"], RecordingMode.HOLD)
@@ -126,7 +128,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
             }
         }
 
-        group(VoiceBundle["settings.model"], indent = false) {
+        groupRowsRange(VoiceBundle["settings.model"], indent = false) {
             row {
                 cell(modelsPanel).align(Align.FILL)
             }
@@ -147,7 +149,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
             }
         }
 
-        group(VoiceBundle["settings.performance"], indent = false) {
+        groupRowsRange(VoiceBundle["settings.performance"], indent = false) {
             row(VoiceBundle["processing.title"]) {
                 comboBox(
                     ProcessingMode.values().toList(),
@@ -166,8 +168,9 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                     .applyToComponent {
                         addChangeListener { info.text = VoiceBundle.message("threads.status", value, max) }
                     }
+                    .comment(VoiceBundle["threads.hint"])
                 cell(info)
-            }.rowComment(VoiceBundle["threads.hint"])
+            }
         }
 
         refreshModels()
