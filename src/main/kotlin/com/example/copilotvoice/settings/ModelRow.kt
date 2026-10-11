@@ -55,7 +55,7 @@ class ModelRow(
         minimumSize = Dimension(0, JBUI.scale(30))
         maximumSize = Dimension(Integer.MAX_VALUE, JBUI.scale(44))
 
-        val name = ModelNameLabel(model.displayName, "${model.id} · ${model.note}")
+        val name = ModelNameLabel(model.displayName, model.note)
         val size = JBLabel(model.sizeLabel).apply { fixedSize(JBUI.scale(64), JBUI.scale(44)) }
         badgeHolder.fixedSize(BADGE_COLUMN_WIDTH, JBUI.scale(44))
         actions.fixedSize(JBUI.scale(192), JBUI.scale(44))

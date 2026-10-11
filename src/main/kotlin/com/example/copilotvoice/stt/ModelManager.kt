@@ -26,10 +26,11 @@ object ModelManager {
     )
 
     val AVAILABLE_MODELS: List<ModelOption> = listOf(
-        ModelOption("tiny.en", "Tiny", "75 MB", "fastest, least accurate", bundled = true),
-        ModelOption("base.en", "Base", "142 MB", "balanced"),
-        ModelOption("small.en", "Small", "466 MB", "good balance"),
-        ModelOption("medium.en", "Medium", "1.5 GB", "most accurate, slowest"),
+        ModelOption("tiny.en", "Tiny", "75 MB", "English · fastest, least accurate", bundled = true),
+        ModelOption("base.en", "Base", "142 MB", "English · quick, fairly accurate"),
+        ModelOption("small.en", "Small", "466 MB", "English · best balance, recommended"),
+        ModelOption("small", "Small", "466 MB", "Multilingual · balanced accuracy"),
+        ModelOption("large-v3-turbo", "Large v3 Turbo", "1.6 GB", "Multilingual · accurate, slower"),
     )
 
     fun downloadUrl(modelId: String): String =
