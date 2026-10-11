@@ -57,8 +57,20 @@ class WhisperCliEngine {
             val detail = stderr.toString().trim().lineSequence().toList().takeLast(5).joinToString(" | ")
             throw TranscriptionException("whisper-cli exited with code $exitCode${if (detail.isNotEmpty()) ": $detail" else ""}")
         }
-        return stdout.toString().trim()
+        return normalizeTranscript(stdout.toString())
     }
+
+    /**
+     * whisper.cpp (build b5454 and later) prints the special token `[BLANK_AUDIO]` for segments
+     * with no speech, one per silent segment. Drop the token (and lines left empty by it) so a
+     * silent clip returns empty text — the condition callers use to show the "no speech" balloon —
+     * while a partly-silent clip keeps its transcribed lines.
+     */
+    internal fun normalizeTranscript(raw: String): String =
+        raw.lineSequence()
+            .map { line -> line.replace(BLANK_AUDIO_TOKEN, " ").replace(MULTIPLE_SPACES, " ").trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("\n")
 
     fun buildArguments(cli: Path, wavFile: File, model: Path, language: String, useGpu: Boolean = false, threads: Int = 0): List<String> {
         val base = listOf(
@@ -77,5 +89,7 @@ class WhisperCliEngine {
     companion object {
         const val DEFAULT_TIMEOUT_MS = 120_000L
         private const val ERROR_JOIN_TIMEOUT_MS = 5_000L
+        private val BLANK_AUDIO_TOKEN = Regex("\\[BLANK_AUDIO\\]", RegexOption.IGNORE_CASE)
+        private val MULTIPLE_SPACES = Regex(" {2,}")
     }
 }

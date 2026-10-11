@@ -85,6 +85,24 @@ class WhisperCliEngineTest {
         val args = WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en")
         assertFalse(args.contains("-t"))
     }
+
+    @Test
+    fun `strips the blank-audio token so a silent clip is empty`() {
+        assertEquals("", WhisperCliEngine().normalizeTranscript("[BLANK_AUDIO]"))
+        assertEquals("", WhisperCliEngine().normalizeTranscript("[BLANK_AUDIO]\n[BLANK_AUDIO]"))
+        assertEquals("", WhisperCliEngine().normalizeTranscript(""))
+    }
+
+    @Test
+    fun `keeps the transcribed lines of a partly-silent clip`() {
+        assertEquals("hello world", WhisperCliEngine().normalizeTranscript("[BLANK_AUDIO]\nhello world"))
+        assertEquals("hello\nworld", WhisperCliEngine().normalizeTranscript("hello\n[BLANK_AUDIO]\nworld"))
+    }
+
+    @Test
+    fun `blank-audio token matching is case-insensitive`() {
+        assertEquals("ok", WhisperCliEngine().normalizeTranscript("[blank_audio] ok"))
+    }
 }
 
 class WhisperRuntimeThreadsTest {
