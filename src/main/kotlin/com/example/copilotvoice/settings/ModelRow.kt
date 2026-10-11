@@ -180,7 +180,7 @@ class ModelRow(
     }
 }
 
-private class HoverButton(text: String) : JButton(text) {
+internal class HoverButton(text: String) : JButton(text) {
     private var hovered = false
 
     init {
