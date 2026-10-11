@@ -18,12 +18,15 @@ import com.intellij.ui.SimpleListCellRenderer
 import com.intellij.util.ui.JBUI
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.dsl.builder.Align
+import com.intellij.ui.dsl.builder.AlignY
 import com.intellij.ui.dsl.builder.Cell
 import com.intellij.ui.dsl.builder.bind
 import com.intellij.ui.dsl.builder.bindItem
 import com.intellij.ui.dsl.builder.bindSelected
 import com.intellij.ui.dsl.builder.bindValue
 import com.intellij.ui.dsl.builder.panel
+import com.intellij.ui.dsl.builder.RightGap
+import java.awt.Dimension
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.nio.file.Files
@@ -32,6 +35,7 @@ import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JEditorPane
 import javax.swing.JPanel
+import javax.swing.SwingConstants
 
 class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     VoiceBundle["settings.title"],
@@ -164,16 +168,24 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
 
             row(VoiceBundle["threads.title"]) {
                 val max = maxThreads.coerceAtLeast(1)
-                val info = JBLabel(VoiceBundle.message("threads.status", s.threads.coerceIn(1, max), max))
-                    .apply { foreground = JBColor.GRAY }
-                slider(1, max, 0, 0)
+                val valueLabel = JBLabel(s.threads.coerceIn(1, max).toString()).apply {
+                    horizontalAlignment = SwingConstants.RIGHT
+                    val width = getFontMetrics(font).stringWidth(max.toString())
+                    preferredSize = Dimension(width, preferredSize.height)
+                    minimumSize = preferredSize
+                }
+                cell(AccentSlider(1, max, s.threads.coerceIn(1, max)))
+                    .align(AlignY.CENTER)
                     .bindValue({ s.threads.coerceIn(1, max) }, { s.threads = it })
                     .applyToComponent {
-                        addChangeListener { info.text = VoiceBundle.message("threads.status", value, max) }
+                        addChangeListener { valueLabel.text = value.toString() }
                     }
-                    .comment(VoiceBundle["threads.hint"])
-                cell(info)
-            }
+                // Small gap so the value and its suffix read as one phrase: "4 of 8 available".
+                cell(valueLabel).gap(RightGap.SMALL).align(AlignY.CENTER)
+                label(VoiceBundle.message("threads.of", max))
+                    .align(AlignY.CENTER)
+                    .applyToComponent { foreground = JBColor.GRAY }
+            }.rowComment(VoiceBundle["threads.hint"])
         }
 
         refreshModels()
