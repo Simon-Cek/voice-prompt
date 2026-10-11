@@ -25,7 +25,7 @@ object WhisperRuntime {
             SystemInfo.isLinux -> "linux-x64"
             else -> throw UnsupportedPlatformException(
                 "Unsupported platform: ${SystemInfo.OS_NAME} (${SystemInfo.OS_ARCH}). " +
-                    "Copilot Voice currently bundles whisper-cli for Windows x64 and Linux x64."
+                    "Voice Prompt currently bundles whisper-cli for Windows x64 and Linux x64."
             )
         }
         return extractIfNeeded(version, platformDir)

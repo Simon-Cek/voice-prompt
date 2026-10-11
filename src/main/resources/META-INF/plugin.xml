@@ -1,11 +1,11 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
     <id>com.example.copilotvoice</id>
-    <name>Copilot Voice for Windows</name>
+    <name>Voice Prompt</name>
     <vendor>Simon Cek</vendor>
     <description><![CDATA[
-        <p>Voice-to-text for GitHub Copilot Chat, built for heavily restricted Windows devices. Hold a shortcut, speak, release — your words are transcribed locally with a bundled whisper.cpp and dropped into the Copilot chat.</p>
-        <p>Made for locked-down machines where Windows built-in dictation is blocked and you can't build whisper.cpp from source: everything (prebuilt binaries + model) ships inside the plugin — no compiler, no admin rights, no network installs.</p>
+        <p>Voice-to-text for GitHub Copilot Chat in IntelliJ-based IDEs. Hold a shortcut, speak, release — your words are transcribed locally with a bundled whisper.cpp and dropped into the Copilot chat.</p>
+        <p>Everything (prebuilt binaries + model) ships inside the plugin — no compiler, no admin rights, no network installs. Transcription runs on your machine: no cloud calls by default.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -21,7 +21,7 @@
     </extensions>
 
     <actions>
-        <action id="com.example.copilotvoice.PushToTalk" class="com.example.copilotvoice.actions.PushToTalkAction" text="Copilot Voice: Push to Talk">
+        <action id="com.example.copilotvoice.PushToTalk" class="com.example.copilotvoice.actions.PushToTalkAction" text="Voice Prompt: Push to Talk">
             <keyboard-shortcut first-keystroke="control alt shift D" keymap="$default"/>
         </action>
     </actions>

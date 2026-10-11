@@ -1,4 +1,4 @@
-# Copilot Voice
+# Voice Prompt
 
 Voice input for GitHub Copilot Chat in IntelliJ-based IDEs. Hold a shortcut, speak, release — your words land in the Copilot chat, transcribed locally with whisper.cpp. No cloud calls by default.
 

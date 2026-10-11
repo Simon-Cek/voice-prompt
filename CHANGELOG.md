@@ -1,6 +1,6 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
-# Copilot Voice Changelog
+# Voice Prompt Changelog
 
 ## [Unreleased]
 

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-You are an expert IntelliJ Platform plugin developer working on **Copilot Voice for Windows**,
+You are an expert IntelliJ Platform plugin developer working on **Voice Prompt**,
 a Kotlin plugin that adds local voice dictation to IntelliJ IDEA. The plugin is an
 **IntelliJ Platform plugin** (not a standalone app): voice-to-text for GitHub Copilot Chat,
 transcribed locally with whisper.cpp. You "run" it by booting a sandbox IDE with the plugin
