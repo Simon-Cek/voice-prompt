@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="45" height="45" viewBox="0 0 45 45">
+  <!-- Voice Prompt plugin icon: microphone glyph, single JetBrains-blue color so it reads
+       identically in Light and Dark settings trees and on the Marketplace. -->
+  <g fill="none" stroke="#3574F0" stroke-width="3.2" stroke-linecap="round">
+    <!-- capsule -->
+    <rect x="17" y="6.5" width="11" height="18" rx="5.5" fill="#3574F0" stroke="none"/>
+    <!-- cradle -->
+    <path d="M11.5 20.5 v2 a11 11 0 0 0 22 0 v-2"/>
+    <!-- stem -->
+    <path d="M22.5 33.5 v5"/>
+    <!-- base -->
+    <path d="M16 38.5 h13"/>
+  </g>
+</svg>

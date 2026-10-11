@@ -34,7 +34,10 @@ class MicrophoneTester(
     val isRunning: Boolean get() = running.get()
 
     fun start(deviceName: String?) {
-        if (isDictationRecording()) return
+        if (DictationState.isRecording) {
+            log.info("Mic test not started: a dictation recording is in progress")
+            return
+        }
         if (!running.compareAndSet(false, true)) return
         stopping = false
         ApplicationManager.getApplication().executeOnPooledThread { capture(deviceName) }
@@ -57,9 +60,6 @@ class MicrophoneTester(
     override fun dispose() {
         stop()
     }
-
-    // TODO: return true while real dictation is capturing (PushToTalkAction.PttState.isRecording), so the test can't run in parallel.
-    private fun isDictationRecording(): Boolean = false
 
     private fun capture(deviceName: String?) {
         val format = AudioFormat(16000f, 16, 1, true, false)

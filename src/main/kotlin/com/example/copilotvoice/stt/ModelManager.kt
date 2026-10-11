@@ -36,6 +36,35 @@ object ModelManager {
     fun downloadUrl(modelId: String): String =
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$modelId.bin"
 
+    /** The checksum manifest the whisper.cpp models repo publishes alongside the models. */
+    fun sha256SumsUrl(): String =
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/SHA256SUMS"
+
+    /**
+     * The published SHA-256 checksum for the [modelId] model file, or null when the manifest
+     * can't be fetched. Does network I/O — call from a background thread.
+     */
+    fun expectedSha256(modelId: String): String? {
+        val fileName = "ggml-$modelId.bin"
+        return try {
+            val content = HttpRequests.request(sha256SumsUrl())
+                .connectTimeout(10_000)
+                .readTimeout(10_000)
+                .readString()
+            parseSha256Sums(content, fileName)
+        } catch (t: Exception) {
+            null
+        }
+    }
+
+    /** The lowercase SHA-256 for [fileName] in SHA256SUMS content, or null if it's not listed. */
+    internal fun parseSha256Sums(content: String, fileName: String): String? =
+        content.lineSequence()
+            .map { it.trim().split(Regex("\\s+"), limit = 2) }
+            .firstOrNull { it.size == 2 && it[1].equals(fileName, ignoreCase = true) }
+            ?.first()
+            ?.lowercase()
+
     fun isInstalled(modelName: String): Boolean = Files.isRegularFile(modelFile(modelName))
 
     /** Whisper `*.en` models are trained English-only; every other id is multilingual. */

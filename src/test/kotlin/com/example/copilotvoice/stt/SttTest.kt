@@ -158,4 +158,36 @@ class ModelManagerTest {
         }
         assertEquals(expected, digest.digest().joinToString("") { "%02x".format(it) })
     }
+
+    @Test
+    fun `parseSha256Sums finds the checksum for the requested file`() {
+        val sums = """
+            abc123  win-x64/whisper-cli.exe
+            DEF456  ggml-base.en.bin
+            000000  ggml-small.en.bin
+        """.trimIndent()
+        assertEquals("def456", ModelManager.parseSha256Sums(sums, "ggml-base.en.bin"))
+    }
+
+    @Test
+    fun `parseSha256Sums is case-insensitive on the file name`() {
+        val sums = "abc123  ggml-base.EN.bin"
+        assertEquals("abc123", ModelManager.parseSha256Sums(sums, "ggml-base.en.bin"))
+    }
+
+    @Test
+    fun `parseSha256Sums returns null when the file is not listed`() {
+        val sums = "abc123  ggml-base.en.bin"
+        assertEquals(null, ModelManager.parseSha256Sums(sums, "ggml-huge.bin"))
+    }
+
+    @Test
+    fun `parseSha256Sums ignores malformed lines`() {
+        val sums = """
+            not-a-checksum
+            abc123
+            abc123  ggml-base.en.bin
+        """.trimIndent()
+        assertEquals("abc123", ModelManager.parseSha256Sums(sums, "ggml-base.en.bin"))
+    }
 }

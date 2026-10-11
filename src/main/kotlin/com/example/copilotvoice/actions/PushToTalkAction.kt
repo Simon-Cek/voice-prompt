@@ -3,6 +3,7 @@ package com.example.copilotvoice.actions
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.audio.AudioCapture
 import com.example.copilotvoice.audio.Beeps
+import com.example.copilotvoice.audio.DictationState
 import com.example.copilotvoice.audio.WavFile
 import com.example.copilotvoice.settings.CopilotVoiceSettings
 import com.example.copilotvoice.settings.ProcessingMode
@@ -14,6 +15,7 @@ import com.example.copilotvoice.stt.WhisperCliEngine
 import com.example.copilotvoice.stt.WhisperLanguage
 import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.Notification
+import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
@@ -22,6 +24,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.KeyboardShortcut
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.progress.ProgressIndicator
@@ -130,6 +133,7 @@ class PushToTalkAction : AnAction() {
             if (fellBack) {
                 notify(project, VoiceBundle.message("notification.mic.fallback", device!!), NotificationType.WARNING)
             }
+            DictationState.set(true)
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStart()
             listeningNotification = notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)
         }
@@ -138,6 +142,7 @@ class PushToTalkAction : AnAction() {
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
             dismissListening()
             val samples = capture.stop()
+            DictationState.set(false)
             if (samples.isEmpty()) return
             try {
                 val wavFile = File(System.getProperty("java.io.tmpdir"), "copilot-voice-${System.currentTimeMillis()}.wav")
@@ -170,7 +175,12 @@ class PushToTalkAction : AnAction() {
                     }
                     if (model == null) {
                         log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
-                        notify(project, VoiceBundle.message("notification.no.model", ModelManager.modelsDir()), NotificationType.WARNING)
+                        notify(
+                            project,
+                            VoiceBundle.message("notification.no.model", ModelManager.modelsDir()),
+                            NotificationType.WARNING,
+                            openSettingsAction(project),
+                        )
                         wavFile.delete()
                         return
                     }
@@ -234,6 +244,14 @@ class PushToTalkAction : AnAction() {
             notify(project, VoiceBundle.message("notification.insert.failed", CopilotVersion.describe()) + text, NotificationType.INFORMATION)
         }
 
+        /** Balloon action that opens the Voice Prompt settings page (plan Day 2 step 6). */
+        private fun openSettingsAction(project: Project?): NotificationAction =
+            NotificationAction.create(VoiceBundle["notification.no.model.openSettings"]) { event, _ ->
+                // The page is preselected by its display name; that must match the configurable's
+                // display name (the "settings.title" bundle key used in plugin.xml).
+                ShowSettingsUtil.getInstance().showSettingsDialog(event.project ?: project, VoiceBundle["settings.title"])
+            }
+
         private fun dismissListening() {
             val n = listeningNotification ?: return
             listeningNotification = null
@@ -244,10 +262,18 @@ class PushToTalkAction : AnAction() {
             }
         }
 
-        private fun notify(project: Project?, content: String, type: NotificationType): Notification? {
+        private fun notify(
+            project: Project?,
+            content: String,
+            type: NotificationType,
+            vararg actions: NotificationAction,
+        ): Notification? {
             val target = project ?: activeProject() ?: return null
             val group = NotificationGroupManager.getInstance().getNotificationGroup(NOTIFICATION_GROUP_ID)
             val notification = group.createNotification(content, type)
+            for (action in actions) {
+                notification.addAction(action)
+            }
             if (java.awt.EventQueue.isDispatchThread()) {
                 notification.notify(target)
             } else {

@@ -2,6 +2,7 @@ package com.example.copilotvoice.download
 
 import com.example.copilotvoice.VoiceBundle
 import com.example.copilotvoice.stt.ModelManager
+import com.example.copilotvoice.stt.WhisperRuntime
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.Disposable
@@ -15,7 +16,9 @@ import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.util.Disposer
 import com.intellij.util.io.HttpRequests
+import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -113,8 +116,10 @@ class ModelDownloadService {
         val part = target.resolveSibling(target.fileName.toString() + ".part")
         Files.createDirectories(target.parent)
         try {
+            var expectedSize = -1L
             HttpRequests.request(url).connect { request ->
                 val total = request.connection.contentLengthLong
+                expectedSize = total
                 indicator.isIndeterminate = total <= 0
                 request.inputStream.use { input ->
                     Files.newOutputStream(part).use { out ->
@@ -134,8 +139,10 @@ class ModelDownloadService {
                     }
                 }
             }
+            // Verify integrity before moving the file into place: a truncated or corrupted model
+            // would otherwise fail later, during transcription, with no hint of why.
+            verifyDownload(part, modelId, expectedSize)
             Files.move(part, target, StandardCopyOption.REPLACE_EXISTING)
-            // TODO: size/checksum verification of the downloaded file.
         } catch (t: ProcessCanceledException) {
             Files.deleteIfExists(part)
             throw t
@@ -144,6 +151,23 @@ class ModelDownloadService {
             LOG.warn("Model download failed for $modelId", t)
             throw t
         }
+    }
+
+    private fun verifyDownload(part: Path, modelId: String, expectedSize: Long) {
+        val actualSize = Files.size(part)
+        if (expectedSize > 0 && actualSize != expectedSize) {
+            throw IOException("Model $modelId is $actualSize bytes, but the server reported $expectedSize")
+        }
+        val expected = ModelManager.expectedSha256(modelId)
+        if (expected == null) {
+            LOG.warn("Published checksum for model $modelId unavailable; verified size only")
+            return
+        }
+        val actual = WhisperRuntime.sha256(part)
+        if (actual != expected) {
+            throw IOException("Checksum mismatch for model $modelId: expected $expected, got $actual")
+        }
+        LOG.info("Model $modelId verified: size=$actualSize sha256=$actual")
     }
 
     private companion object {

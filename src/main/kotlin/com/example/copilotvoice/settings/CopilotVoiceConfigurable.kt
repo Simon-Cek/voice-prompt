@@ -1,6 +1,7 @@
 package com.example.copilotvoice.settings
 
 import com.example.copilotvoice.VoiceBundle
+import com.example.copilotvoice.audio.DictationState
 import com.example.copilotvoice.audio.MicrophoneTester
 import com.example.copilotvoice.stt.ModelManager
 import com.example.copilotvoice.stt.WhisperLanguage
@@ -59,19 +60,14 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     private var micComponent: JComponent? = null
     private var testButton: JButton? = null
     private var hintCell: Cell<JBLabel>? = null
-    private val rowsDisposable: Disposable = Disposer.newDisposable()
-    // TODO: drive this live from dictation state (PushToTalkAction.PttState.isRecording) so the button disables while recording.
-    private val micTestEnabled = AtomicBooleanProperty(!isDictationRecording())
-    private val tester = MicrophoneTester(
-        parent = rowsDisposable,
-        onLevel = { level ->
-            levelMeter.level = level
-            if (level > 0.05 && hintCell?.component?.isVisible == true) showHint(null)
-        },
-        onNoSound = { showHint("No sound detected. Check that the right microphone is selected and not muted.") },
-        onError = { showHint(it) },
-        onStopped = { testButton?.text = VoiceBundle["settings.mic.test"] },
-    )
+    private val micTestEnabled = AtomicBooleanProperty(!DictationState.isRecording)
+
+    // The IntelliJ framework reuses one CopilotVoiceConfigurable across settings sessions —
+    // createPanel() runs again after disposeUIResources(). Registering a child on an already-
+    // disposed parent throws IncorrectOperationException, so every UI-session resource is
+    // (re)created per session and tied to a disposable that is live only for that session.
+    private var session: Disposable? = null
+    private var tester: MicrophoneTester? = null
 
     companion object {
         private val SYSTEM_DEFAULT = VoiceBundle["settings.input.default"]
@@ -80,115 +76,150 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     override fun getPreferredFocusedComponent(): JComponent? = micComponent
 
     override fun disposeUIResources() {
-        Disposer.dispose(rowsDisposable)
+        val current = session
+        session = null
+        tester = null
+        if (current != null) Disposer.dispose(current)
         super.disposeUIResources()
     }
 
-    override fun createPanel(): DialogPanel = panel {
-        // groupRowsRange, not group(): group() builds its content in a nested panel with an independent grid,
-        // giving each section its own label column; groupRowsRange keeps the rows in the one shared grid.
-        groupRowsRange(VoiceBundle["settings.dictation"], indent = false) {
-            buttonsGroup {
-                row(VoiceBundle["recordingMode.title"]) {
-                    radioButton(VoiceBundle["recordingMode.hold"], RecordingMode.HOLD)
-                    radioButton(VoiceBundle["recordingMode.tap"], RecordingMode.TAP)
-                }
-            }.bind({ s.mode }, { s.mode = it })
+    /**
+     * (Re)establishes the session-scoped resources for a settings page: a fresh disposable that
+     * owns the mic tester, the model-row download listeners, and the dictation-state listener.
+     * Safe to call again — it disposes any live session first — which is required because the
+     * framework reuses this instance and calls createPanel() again after disposeUIResources().
+     */
+    private fun beginSession() {
+        val current = session
+        session = null
+        tester = null
+        if (current != null) Disposer.dispose(current)
+        val rowsDisposable = Disposer.newDisposable()
+        session = rowsDisposable
+        // Keep the Test button in step with the recording state; removed with the session.
+        DictationState.addListener(rowsDisposable) { micTestEnabled.set(!it) }
+        tester = MicrophoneTester(
+            parent = rowsDisposable,
+            onLevel = { level ->
+                levelMeter.level = level
+                if (level > 0.05 && hintCell?.component?.isVisible == true) showHint(null)
+            },
+            onNoSound = { showHint("No sound detected. Check that the right microphone is selected and not muted.") },
+            onError = { showHint(it) },
+            onStopped = { testButton?.text = VoiceBundle["settings.mic.test"] },
+        )
+    }
 
-            row {
-                checkBox(VoiceBundle["sound.enabled"])
-                    .bindSelected({ s.soundEnabled }, { s.soundEnabled = it })
-            }
-
-            row {
-                checkBox(VoiceBundle["settings.auto.send"])
-                    .bindSelected({ s.autoSend }, { s.autoSend = it })
-                    .comment(VoiceBundle["settings.auto.send.hint"])
-            }
-
-            row(VoiceBundle["settings.input.title"]) {
-                val mic = comboBox(inputDeviceNames())
-                micComponent = mic.component
-                mic.bindItem(
-                    { s.inputDevice ?: SYSTEM_DEFAULT },
-                    { name -> s.inputDevice = if (name == SYSTEM_DEFAULT) null else name },
-                ).widthGroup("voiceCombos")
-                mic.component.addItemListener { tester.stop() }
-
-                val testBtn = HoverButton(VoiceBundle["settings.mic.test"]).apply {
-                    addActionListener { onMicTestClick() }
-                }
-                val testCell = cell(testBtn)
-                testButton = testBtn
-                testCell.enabledIf(micTestEnabled)
-
-                cell(levelMeter)
-            }
-
-            row {
-                val hint = cell(JBLabel().apply {
-                    foreground = JBColor.GRAY
-                    isVisible = false
-                })
-                hintCell = hint
-            }
-        }
-
-        groupRowsRange(VoiceBundle["settings.model"], indent = false) {
-            row {
-                cell(modelsPanel).align(Align.FILL)
-            }
-
-            row(VoiceBundle["language.title"]) {
-                val language = comboBox(
-                    WhisperLanguage.values().map { it.code },
-                    SimpleListCellRenderer.create<String>("") { code ->
-                        WhisperLanguage.fromCode(code).displayName
-                    },
-                )
-                language.bindItem({ s.language }, { s.language = it ?: s.language })
-                    .widthGroup("voiceCombos")
-                    .enabledIf(languageEnabled)
-                    .comment(languageHint())
-                languageComment = language.comment
-                languageCell = language
-                syncLanguage()
-            }
-        }
-
-        groupRowsRange(VoiceBundle["settings.performance"], indent = false) {
-            row(VoiceBundle["processing.title"]) {
-                comboBox(
-                    ProcessingMode.values().toList(),
-                    SimpleListCellRenderer.create<ProcessingMode>("") { processingLabel(it) },
-                ).bindItem({ s.processingMode }, { s.processingMode = it ?: s.processingMode })
-                    .widthGroup("voiceCombos")
-                    .comment(VoiceBundle["processing.hint"])
-            }
-
-            row(VoiceBundle["threads.title"]) {
-                val max = maxThreads.coerceAtLeast(1)
-                val valueLabel = JBLabel(s.threads.coerceIn(1, max).toString()).apply {
-                    horizontalAlignment = SwingConstants.RIGHT
-                    val width = getFontMetrics(font).stringWidth(max.toString())
-                    preferredSize = Dimension(width, preferredSize.height)
-                    minimumSize = preferredSize
-                }
-                cell(AccentSlider(1, max, s.threads.coerceIn(1, max)))
-                    .align(AlignY.CENTER)
-                    .bindValue({ s.threads.coerceIn(1, max) }, { s.threads = it })
-                    .applyToComponent {
-                        addChangeListener { valueLabel.text = value.toString() }
+    override fun createPanel(): DialogPanel {
+        beginSession()
+        return panel {
+            // groupRowsRange, not group(): group() builds its content in a nested panel with an independent grid,
+            // giving each section its own label column; groupRowsRange keeps the rows in the one shared grid.
+            groupRowsRange(VoiceBundle["settings.dictation"], indent = false) {
+                buttonsGroup {
+                    row(VoiceBundle["recordingMode.title"]) {
+                        radioButton(VoiceBundle["recordingMode.hold"], RecordingMode.HOLD)
+                        radioButton(VoiceBundle["recordingMode.tap"], RecordingMode.TAP)
                     }
-                // Small gap so the value and its suffix read as one phrase: "4 of 8 available".
-                cell(valueLabel).gap(RightGap.SMALL).align(AlignY.CENTER)
-                label(VoiceBundle.message("threads.of", max))
-                    .align(AlignY.CENTER)
-                    .applyToComponent { foreground = JBColor.GRAY }
-            }.rowComment(VoiceBundle["threads.hint"])
-        }
+                }.bind({ s.mode }, { s.mode = it })
 
-        refreshModels()
+                row {
+                    checkBox(VoiceBundle["sound.enabled"])
+                        .bindSelected({ s.soundEnabled }, { s.soundEnabled = it })
+                }
+
+                row {
+                    checkBox(VoiceBundle["settings.auto.send"])
+                        .bindSelected({ s.autoSend }, { s.autoSend = it })
+                        .comment(VoiceBundle["settings.auto.send.hint"])
+                }
+
+                row(VoiceBundle["settings.input.title"]) {
+                    // The mic test can't run while a dictation recording is in progress.
+                    micTestEnabled.set(!DictationState.isRecording)
+                    val mic = comboBox(inputDeviceNames())
+                    micComponent = mic.component
+                    mic.bindItem(
+                        { s.inputDevice ?: SYSTEM_DEFAULT },
+                        { name -> s.inputDevice = if (name == SYSTEM_DEFAULT) null else name },
+                    ).widthGroup("voiceCombos")
+                    mic.component.addItemListener { tester?.stop() }
+
+                    val testBtn = HoverButton(VoiceBundle["settings.mic.test"]).apply {
+                        addActionListener { onMicTestClick() }
+                    }
+                    val testCell = cell(testBtn)
+                    testButton = testBtn
+                    testCell.enabledIf(micTestEnabled)
+
+                    cell(levelMeter)
+                }
+
+                row {
+                    val hint = cell(JBLabel().apply {
+                        foreground = JBColor.GRAY
+                        isVisible = false
+                    })
+                    hintCell = hint
+                }
+            }
+
+            groupRowsRange(VoiceBundle["settings.model"], indent = false) {
+                row {
+                    cell(modelsPanel).align(Align.FILL)
+                }
+
+                row(VoiceBundle["language.title"]) {
+                    val language = comboBox(
+                        WhisperLanguage.values().map { it.code },
+                        SimpleListCellRenderer.create<String>("") { code ->
+                            WhisperLanguage.fromCode(code).displayName
+                        },
+                    )
+                    language.bindItem({ s.language }, { s.language = it ?: s.language })
+                        .widthGroup("voiceCombos")
+                        .enabledIf(languageEnabled)
+                        .comment(languageHint())
+                    languageComment = language.comment
+                    languageCell = language
+                    syncLanguage()
+                }
+            }
+
+            groupRowsRange(VoiceBundle["settings.performance"], indent = false) {
+                row(VoiceBundle["processing.title"]) {
+                    comboBox(
+                        ProcessingMode.values().toList(),
+                        SimpleListCellRenderer.create<ProcessingMode>("") { processingLabel(it) },
+                    ).bindItem({ s.processingMode }, { s.processingMode = it ?: s.processingMode })
+                        .widthGroup("voiceCombos")
+                        .comment(VoiceBundle["processing.hint"])
+                }
+
+                row(VoiceBundle["threads.title"]) {
+                    val max = maxThreads.coerceAtLeast(1)
+                    val valueLabel = JBLabel(s.threads.coerceIn(1, max).toString()).apply {
+                        horizontalAlignment = SwingConstants.RIGHT
+                        val width = getFontMetrics(font).stringWidth(max.toString())
+                        preferredSize = Dimension(width, preferredSize.height)
+                        minimumSize = preferredSize
+                    }
+                    cell(AccentSlider(1, max, s.threads.coerceIn(1, max)))
+                        .align(AlignY.CENTER)
+                        .bindValue({ s.threads.coerceIn(1, max) }, { s.threads = it })
+                        .applyToComponent {
+                            addChangeListener { valueLabel.text = value.toString() }
+                        }
+                    // Small gap so the value and its suffix read as one phrase: "4 of 8 available".
+                    cell(valueLabel).gap(RightGap.SMALL).align(AlignY.CENTER)
+                    label(VoiceBundle.message("threads.of", max))
+                        .align(AlignY.CENTER)
+                        .applyToComponent { foreground = JBColor.GRAY }
+                }.rowComment(VoiceBundle["threads.hint"])
+            }
+
+            refreshModels()
+        }
     }
 
     // --- speech models (per-row Use / Download / Delete) ---
@@ -216,6 +247,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     }
 
     private fun rebuildModelRows() {
+        val rowsDisposable = session ?: return
         modelsPanel.removeAll()
         val options = ModelManager.AVAILABLE_MODELS
         options.forEachIndexed { index, option ->
@@ -287,6 +319,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     }
 
     private fun onMicTestClick() {
+        val tester = tester ?: return
         if (tester.isRunning) {
             tester.stop()
         } else {
@@ -302,9 +335,6 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
             it.visible(text != null)
         }
     }
-
-    // TODO: return true while real dictation is recording (PushToTalkAction.PttState.isRecording).
-    private fun isDictationRecording(): Boolean = false
 
     private fun processingLabel(mode: ProcessingMode): String = when (mode) {
         ProcessingMode.AUTOMATIC -> VoiceBundle["processing.automatic"]
