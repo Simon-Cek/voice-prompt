@@ -163,14 +163,26 @@ class PushToTalkAction : AnAction() {
                     var model = resolved
                     var activeModelId = requestedModelId
                     if (model == null) {
-                        // The selected model isn't installed (e.g. no network to download it): fall
-                        // back to the model bundled inside the plugin.
-                        val bundled = ModelManager.installBundledModel()
-                        if (bundled != null) {
-                            model = bundled
-                            activeModelId = ModelManager.BUNDLED_MODEL
-                            log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
-                            notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
+                        if (requestedModelId == ModelManager.BUNDLED_MODEL) {
+                            // The selected model is the bundled one but hasn't been extracted to
+                            // disk yet (fresh install): extract it. This is the expected first-use
+                            // path, not a fallback, so no "we fell back" notification.
+                            val bundled = ModelManager.installBundledModel()
+                            if (bundled != null) {
+                                model = bundled
+                                activeModelId = ModelManager.BUNDLED_MODEL
+                                log.info("extracting bundled model for first use: $bundled")
+                            }
+                        } else {
+                            // The selected model isn't installed (e.g. no network to download it):
+                            // fall back to the model bundled inside the plugin.
+                            val bundled = ModelManager.installBundledModel()
+                            if (bundled != null) {
+                                model = bundled
+                                activeModelId = ModelManager.BUNDLED_MODEL
+                                log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
+                                notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
+                            }
                         }
                     }
                     if (model == null) {
@@ -216,10 +228,10 @@ class PushToTalkAction : AnAction() {
             }
         }
 
-        /** CPU threads for whisper: the user's setting, or the max physical core count. */
+        /** CPU threads for whisper: the user's setting, or half the logical processor count. */
         private fun threads(): Int {
             val set = CopilotVoiceSettings.instance.threads
-            return if (set > 0) set else WhisperRuntime.physicalThreads()
+            return if (set > 0) set else WhisperRuntime.defaultThreads()
         }
 
         private fun deliverToChat(project: Project?, text: String) {

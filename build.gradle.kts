@@ -15,6 +15,12 @@ dependencies {
     intellijPlatform {
         intellijIdea("2025.3.6.1")
         testFramework(TestFrameworkType.Platform)
+
+        // Declared here so it is part of sandbox preparation (PrepareSandboxTask installs it on
+        // every `runIde` start). A copy installed by the user inside the sandbox does not survive
+        // relaunches: `runIde` re-prepares the sandbox and wipes the user plugins directory.
+        // This keeps GitHub Copilot available for the chat-insertion checks across relaunches.
+        plugin("com.github.copilot", "1.19.0-252")
     }
 }
 

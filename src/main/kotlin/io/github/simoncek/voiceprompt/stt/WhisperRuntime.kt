@@ -151,32 +151,11 @@ object WhisperRuntime {
     fun availableThreads(): Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
 
     /**
-     * Maximum CPU threads for whisper: the physical core count, i.e. logical threads divided by
-     * threads-per-core (SMT). Hyperthreads share execution units, so for the compute-bound matmuls the
-     * physical core count is the ceiling whisper benefits from. Falls back to the logical count when
-     * threads-per-core can't be detected.
+     * Recommended CPU threads for whisper: half the logical processor count. On SMT machines that is
+     * exactly the physical core count — hyperthreads share execution units, so they don't help the
+     * compute-bound matmuls past the core count; on machines without SMT it is a conservative value
+     * (whisper.cpp itself defaults to just 4 threads). Half-the-logical needs no OS-specific SMT
+     * detection and yields the same number on every platform.
      */
-    fun physicalThreads(): Int = (availableThreads() / threadsPerCore()).coerceIn(1, availableThreads())
-
-    /** Threads per physical core (2 with SMT, 1 without), best-effort per OS. */
-    private fun threadsPerCore(): Int = try {
-        when {
-            SystemInfo.isLinux -> linuxThreadsPerCore()
-            SystemInfo.isMac -> macThreadsPerCore()
-            else -> 1
-        }
-    } catch (t: Exception) {
-        1
-    }
-
-    private fun linuxThreadsPerCore(): Int {
-        val list = Files.readString(Paths.get("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list"))
-        return list.trim().split(',').size.coerceAtLeast(1)
-    }
-
-    private fun macThreadsPerCore(): Int {
-        val output = ProcessBuilder("sysctl", "-n", "hw.tpc").redirectErrorStream(true).start()
-            .inputStream.bufferedReader().use { it.readText() }.trim()
-        return output.toIntOrNull()?.coerceAtLeast(1) ?: 1
-    }
+    fun defaultThreads(): Int = (availableThreads() / 2).coerceIn(1, availableThreads())
 }

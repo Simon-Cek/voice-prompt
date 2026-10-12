@@ -11,10 +11,11 @@ import java.nio.file.StandardCopyOption
 
 object ModelManager {
 
-    const val DEFAULT_MODEL = "base.en"
-
     /** The model that ships inside the plugin jar so dictation works without a network. */
     const val BUNDLED_MODEL = "tiny.en"
+
+    /** Default model for fresh installs: the bundled one, so dictation works offline out of the box. */
+    const val DEFAULT_MODEL = BUNDLED_MODEL
 
     /** A downloadable Whisper model, its approximate size, and a short quality note. */
     data class ModelOption(

@@ -45,7 +45,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
 ) {
 
     private val s = CopilotVoiceSettings.instance
-    private val maxThreads = WhisperRuntime.physicalThreads()
+    private val maxThreads = WhisperRuntime.availableThreads()
     private val modelsPanel = JPanel(GridBagLayout()).apply {
         isOpaque = false
         border = JBUI.Borders.compound(
@@ -225,7 +225,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     // --- speech models (per-row Use / Download / Delete) ---
 
     private fun statusOf(option: ModelManager.ModelOption): ModelStatus {
-        if (ModelManager.isInstalled(option.id)) {
+        if (available(option)) {
             return if (option.id == s.modelName) ModelStatus.ACTIVE else ModelStatus.INSTALLED
         }
         return if (option.bundled && ModelManager.bundledModelAvailable()) {
@@ -235,9 +235,19 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         }
     }
 
-    private fun useModel(id: String) {
-        if (!ModelManager.isInstalled(id)) return
-        s.modelName = id
+    /**
+     * A model is available when its file is on disk, or — for the bundled model — when it ships
+     * inside the plugin jar and the user hasn't explicitly deleted it. The bundled model is
+     * extracted to disk lazily (on first transcription or Restore), so it counts as installed
+     * even before that; an explicit deletion is what turns it into the restorable BUNDLED state.
+     */
+    private fun available(option: ModelManager.ModelOption): Boolean =
+        ModelManager.isInstalled(option.id) ||
+            (option.bundled && ModelManager.bundledModelAvailable() && !s.bundledModelDeleted)
+
+    private fun useModel(option: ModelManager.ModelOption) {
+        if (!available(option)) return
+        s.modelName = option.id
         refreshModels()
     }
 
@@ -262,9 +272,13 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                     option,
                     statusOf(option),
                     isLast = index == options.lastIndex,
-                    installedCount = { options.count { ModelManager.isInstalled(it.id) } },
-                    onUse = { useModel(option.id) },
-                    onDelete = { deleteModel(option.id) },
+                    usableCount = { options.count { available(it) } },
+                    onUse = { useModel(option) },
+                    onDelete = { deleteModel(option) },
+                    onRestore = { success ->
+                        if (success) s.bundledModelDeleted = false
+                        refreshModels()
+                    },
                     parentDisposable = rowsDisposable,
                 ),
                 constraints,
@@ -298,20 +312,28 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         if (ModelManager.isEnglishOnly(s.modelName)) VoiceBundle["language.englishOnly.hint"]
         else VoiceBundle["language.multilingual.hint"]
 
-    private fun deleteModel(id: String) {
-        val file = ModelManager.modelFile(id)
-        if (!Files.isRegularFile(file)) return
+    private fun deleteModel(option: ModelManager.ModelOption) {
+        val file = ModelManager.modelFile(option.id)
+        // A bundled model can be deleted even before it was extracted to disk: the deletion then
+        // just marks it as removed so the row offers to Restore it from the plugin jar.
+        if (!Files.isRegularFile(file) && !option.bundled) return
+        val message = if (option.bundled) {
+            VoiceBundle.message("model.delete.confirm.bundled", option.displayName)
+        } else {
+            VoiceBundle.message("model.delete.confirm", option.displayName)
+        }
         val confirmed = Messages.showYesNoDialog(
             modelsPanel,
-            VoiceBundle.message("model.delete.confirm", id),
+            message,
             VoiceBundle["model.delete.title"],
             Messages.getQuestionIcon(),
         )
         if (confirmed != Messages.YES) return
         Files.deleteIfExists(file)
-        if (s.modelName == id) {
+        if (option.bundled) s.bundledModelDeleted = true
+        if (s.modelName == option.id) {
             val fallback = ModelManager.AVAILABLE_MODELS
-                .firstOrNull { ModelManager.isInstalled(it.id) }
+                .firstOrNull { it.id != option.id && available(it) }
                 ?.id ?: ModelManager.DEFAULT_MODEL
             s.modelName = fallback
         }

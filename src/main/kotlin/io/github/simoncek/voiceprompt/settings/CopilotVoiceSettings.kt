@@ -2,6 +2,7 @@ package io.github.simoncek.voiceprompt.settings
 
 import io.github.simoncek.voiceprompt.stt.ModelManager
 import io.github.simoncek.voiceprompt.stt.WhisperLanguage
+import io.github.simoncek.voiceprompt.stt.WhisperRuntime
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
@@ -23,8 +24,10 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         var processingMode: ProcessingMode = ProcessingMode.AUTOMATIC
         /** Language for whisper; "auto" = auto-detect (see WhisperLanguage). */
         var language: String = WhisperLanguage.AUTO.code
-        /** CPU threads for whisper; 0 = auto (recommended physical core count). */
-        var threads: Int = 0
+        /** CPU threads for whisper; default = half the logical processor count (0 = auto, legacy). */
+        var threads: Int = WhisperRuntime.defaultThreads()
+        /** The user explicitly deleted the bundled model; its row offers to Restore it from the plugin jar. */
+        var bundledModelDeleted: Boolean = false
     }
 
     private val state = State()
@@ -75,6 +78,12 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         get() = state.threads
         set(value) {
             state.threads = value
+        }
+
+    var bundledModelDeleted: Boolean
+        get() = state.bundledModelDeleted
+        set(value) {
+            state.bundledModelDeleted = value
         }
 
     override fun getState(): State = state

@@ -33,9 +33,11 @@ class ModelRow(
     private val model: ModelManager.ModelOption,
     private var status: ModelStatus,
     private val isLast: Boolean,
-    private val installedCount: () -> Int,
+    /** How many models are usable right now (on disk, or bundled and not deleted). */
+    private val usableCount: () -> Int,
     private val onUse: () -> Unit,
     private val onDelete: () -> Unit,
+    private val onRestore: (Boolean) -> Unit,
     private val parentDisposable: Disposable,
 ) : JPanel(GridBagLayout()) {
 
@@ -150,8 +152,9 @@ class ModelRow(
                 }
 
                 override fun onFinished() {
-                    status = if (success) ModelStatus.INSTALLED else ModelStatus.BUNDLED
-                    refresh()
+                    // The configurable clears the "bundled deleted" flag and rebuilds the rows,
+                    // so the badge is recomputed from the shared settings state.
+                    onRestore(success)
                 }
             }
             task.queue()
@@ -160,13 +163,15 @@ class ModelRow(
 
     private fun deleteButton(): JButton = HoverButton(VoiceBundle["model.delete"]).apply {
         when {
-            installedCount() <= 1 -> {
-                isEnabled = false
-                toolTipText = VoiceBundle["model.delete.disabled.only"]
-            }
             status == ModelStatus.ACTIVE -> {
                 isEnabled = false
                 toolTipText = VoiceBundle["model.delete.disabled.active"]
+            }
+            // The bundled model is always deletable: the copy inside the plugin jar remains,
+            // and the row offers to Restore it — deletion is what produces the Bundled state.
+            !this@ModelRow.model.bundled && usableCount() <= 1 -> {
+                isEnabled = false
+                toolTipText = VoiceBundle["model.delete.disabled.only"]
             }
             else -> addActionListener { onDelete() }
         }

@@ -108,11 +108,11 @@ class WhisperCliEngineTest {
 class WhisperRuntimeThreadsTest {
 
     @Test
-    fun `physical threads stay within the logical range`() {
+    fun `default threads stay within the logical range`() {
         val logical = WhisperRuntime.availableThreads()
-        val physical = WhisperRuntime.physicalThreads()
-        assertTrue("physical >= 1", physical >= 1)
-        assertTrue("physical <= logical ($physical <= $logical)", physical <= logical)
+        val def = WhisperRuntime.defaultThreads()
+        assertTrue("default >= 1", def >= 1)
+        assertTrue("default <= logical ($def <= $logical)", def <= logical)
     }
 }
 
