@@ -15,7 +15,6 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Disposer
 import com.intellij.ui.JBColor
 import com.intellij.ui.RoundedLineBorder
-import com.intellij.ui.SimpleListCellRenderer
 import com.intellij.util.ui.JBUI
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.dsl.builder.Align
@@ -172,7 +171,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                 row(VoiceBundle["language.title"]) {
                     val language = comboBox(
                         WhisperLanguage.values().map { it.code },
-                        SimpleListCellRenderer.create<String>("") { code ->
+                        TextCellRenderer<String> { code ->
                             WhisperLanguage.fromCode(code).displayName
                         },
                     )
@@ -190,7 +189,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                 row(VoiceBundle["processing.title"]) {
                     comboBox(
                         ProcessingMode.values().toList(),
-                        SimpleListCellRenderer.create<ProcessingMode>("") { processingLabel(it) },
+                        TextCellRenderer<ProcessingMode> { processingLabel(it) },
                     ).bindItem({ s.processingMode }, { s.processingMode = it ?: s.processingMode })
                         .widthGroup("voiceCombos")
                         .comment(VoiceBundle["processing.hint"])
