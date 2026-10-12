@@ -122,7 +122,7 @@
     ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
-    <depends optional="true">com.github.copilot</depends>
+    <depends optional="true" config-file="copilot.xml">com.github.copilot</depends>
 
     <resource-bundle>messages.VoiceBundle</resource-bundle>
 

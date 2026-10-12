@@ -45,6 +45,9 @@ object CopilotChatLocator {
      * Choose a locator for [version]. When a Copilot release breaks injection, add a known-good
      * locator for it here (e.g. `if (version?.startsWith("1.9") == true) return V19ChatLocator()`);
      * otherwise the lenient locator handles it.
+     *
+     * [version] is diagnostics only (see [CopilotVersion]) and may be null on any platform build —
+     * the hook must keep working without it, so never gate the locator's availability on it.
      */
     private fun resolve(version: String?): ChatLocator {
         // Extension point for version-specific locators.

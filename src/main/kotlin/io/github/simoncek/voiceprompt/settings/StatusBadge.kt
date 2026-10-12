@@ -8,7 +8,6 @@ import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
-import java.awt.Toolkit
 import javax.swing.SwingConstants
 
 class StatusBadge(status: ModelStatus, text: String = status.label) : JBLabel(text) {
@@ -54,7 +53,7 @@ class StatusBadge(status: ModelStatus, text: String = status.label) : JBLabel(te
             val probe = JBLabel("")
             probe.border = JBUI.Borders.empty(3, 9)
             val insets = probe.border.getBorderInsets(probe)
-            val metrics = Toolkit.getDefaultToolkit().getFontMetrics(probe.font)
+            val metrics = probe.getFontMetrics(probe.font)
             val widestText = ModelStatus.values().maxOf { metrics.stringWidth(it.label) }
             widestText + insets.left + insets.right
         }

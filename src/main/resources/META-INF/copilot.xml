@@ -1,0 +1,7 @@
+<!--
+    Extension-point configuration for the optional GitHub Copilot dependency.
+    Voice Prompt does not register against any Copilot extension point: it only detects the
+    plugin (diagnostics) and pastes text into its chat input. This file exists so the optional
+    <depends> can declare a config-file, as required by the Plugin Verifier and the Marketplace.
+-->
+<idea-plugin/>

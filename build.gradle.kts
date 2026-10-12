@@ -26,3 +26,11 @@ intellijPlatform {
         }
     }
 }
+
+tasks.verifyPlugin {
+    // The verifier JVM is a plain fork: without a cap it takes ~1/4 of physical RAM (7.5 GB here),
+    // which under this machine's memory pressure crashed G1 (SIGSEGV in G1ParScanThreadState).
+    // Cap the heap and lower GC concurrency so it stays well inside available memory.
+    maxHeapSize = "5g"
+    jvmArgs("-XX:ParallelGCThreads=4")
+}

@@ -21,7 +21,6 @@ import java.awt.Graphics2D
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.RenderingHints
-import java.awt.Toolkit
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.JButton
@@ -265,8 +264,8 @@ private class ModelNameLabel(
     }
 
     override fun getPreferredSize(): Dimension {
-        val nameMetrics = Toolkit.getDefaultToolkit().getFontMetrics(nameFont)
-        val noteMetrics = Toolkit.getDefaultToolkit().getFontMetrics(noteFont)
+        val nameMetrics = getFontMetrics(nameFont)
+        val noteMetrics = getFontMetrics(noteFont)
         val width = nameMetrics.stringWidth(nameText) + spacing + noteMetrics.stringWidth(noteText)
         val height = maxOf(nameMetrics.height, noteMetrics.height)
         return Dimension(width, height)
