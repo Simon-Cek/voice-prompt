@@ -113,8 +113,10 @@ class ModelDownloadService {
     // Runs on a background thread.
     private fun download(modelId: String, url: String, indicator: ProgressIndicator) {
         val target = ModelManager.modelFile(modelId)
-        val part = target.resolveSibling(target.fileName.toString() + ".part")
         Files.createDirectories(target.parent)
+        // A unique per-process part file: two IDEs of the same version downloading the same
+        // model must not truncate each other's in-progress download (a shared fixed name would).
+        val part = Files.createTempFile(target.parent, target.fileName.toString(), ".part")
         try {
             var expectedSize = -1L
             HttpRequests.request(url).connect { request ->
