@@ -1,6 +1,7 @@
 package io.github.simoncek.voiceprompt.audio
 
 import com.intellij.openapi.Disposable
+import io.github.simoncek.voiceprompt.state.DictationStatus
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.diagnostic.Logger
@@ -34,8 +35,8 @@ class MicrophoneTester(
     val isRunning: Boolean get() = running.get()
 
     fun start(deviceName: String?) {
-        if (DictationState.isRecording) {
-            log.info("Mic test not started: a dictation recording is in progress")
+        if (DictationStatus.instance.isCapturing) {
+            log.info("Mic test not started: dictation is in progress")
             return
         }
         if (!running.compareAndSet(false, true)) return

@@ -8,6 +8,7 @@ import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.intellij.util.xmlb.XmlSerializerUtil
+import java.util.concurrent.CopyOnWriteArrayList
 
 @State(name = "CopilotVoiceSettings", storages = [Storage("copilot-voice.xml")])
 class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State> {
@@ -28,6 +29,8 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         var threads: Int = WhisperRuntime.defaultThreads()
         /** The user explicitly deleted the bundled model; its row offers to Restore it from the plugin jar. */
         var bundledModelDeleted: Boolean = false
+        /** Show the status bar mic icon while dictation is idle (the widget still shows text while active). */
+        var showIdleIndicator: Boolean = true
     }
 
     private val state = State()
@@ -85,6 +88,26 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         set(value) {
             state.bundledModelDeleted = value
         }
+
+    var showIdleIndicator: Boolean
+        get() = state.showIdleIndicator
+        set(value) {
+            state.showIdleIndicator = value
+            idleIndicatorListeners.forEach { it() }
+        }
+
+    // The status bar widget decides its idle visibility from this setting and re-renders on
+    // change. Listeners are invoked on the thread that changes the setting (the settings UI,
+    // i.e. the EDT); CopyOnWriteArrayList keeps registration safe from any thread.
+    private val idleIndicatorListeners = CopyOnWriteArrayList<() -> Unit>()
+
+    fun addIdleIndicatorListener(listener: () -> Unit) {
+        idleIndicatorListeners.add(listener)
+    }
+
+    fun removeIdleIndicatorListener(listener: () -> Unit) {
+        idleIndicatorListeners.remove(listener)
+    }
 
     override fun getState(): State = state
 

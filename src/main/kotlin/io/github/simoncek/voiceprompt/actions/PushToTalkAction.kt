@@ -3,7 +3,8 @@ package io.github.simoncek.voiceprompt.actions
 import io.github.simoncek.voiceprompt.VoiceBundle
 import io.github.simoncek.voiceprompt.audio.AudioCapture
 import io.github.simoncek.voiceprompt.audio.Beeps
-import io.github.simoncek.voiceprompt.audio.DictationState
+import io.github.simoncek.voiceprompt.state.DictationPhase
+import io.github.simoncek.voiceprompt.state.DictationStatus
 import io.github.simoncek.voiceprompt.audio.WavFile
 import io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings
 import io.github.simoncek.voiceprompt.settings.ProcessingMode
@@ -52,7 +53,8 @@ class PushToTalkAction : AnAction() {
         private val capture = AudioCapture().also { it.onMaxDurationReached = { stop() } }
         @Volatile private var watcherInstalled = false
         private val chatSink = ChatSinkChain.default()
-        @Volatile private var listeningNotification: Notification? = null
+        /** The shared dictation phase; the status bar widget and the mic test are read-only views. */
+        private val status = DictationStatus.instance
         /**
          * The project the current recording belongs to, captured when the recording starts. The
          * stop paths (key release, max duration) carry no event project of their own, so delivery
@@ -117,12 +119,15 @@ class PushToTalkAction : AnAction() {
         }
 
         fun start(project: Project?) {
+            // "Opening mic…" in the status bar while the capture line is opened.
+            status.setPhase(DictationPhase.OPENING)
             val device = CopilotVoiceSettings.instance.inputDevice
             val fellBack = try {
                 capture.start(device)
                 false
             } catch (t: Exception) {
                 if (device == null) {
+                    status.setPhase(DictationPhase.IDLE)
                     notify(project, VoiceBundle.message("notification.mic.open.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                     return
                 }
@@ -130,6 +135,7 @@ class PushToTalkAction : AnAction() {
                 try {
                     capture.start()
                 } catch (t2: Exception) {
+                    status.setPhase(DictationPhase.IDLE)
                     notify(project, VoiceBundle.message("notification.mic.open.failed", t2.message ?: t2.javaClass.simpleName), NotificationType.ERROR)
                     return
                 }
@@ -139,9 +145,8 @@ class PushToTalkAction : AnAction() {
                 notify(project, VoiceBundle.message("notification.mic.fallback", device!!), NotificationType.WARNING)
             }
             recordingProject = project
-            DictationState.set(true)
+            status.setPhase(DictationPhase.RECORDING)
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStart()
-            listeningNotification = notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)
         }
 
         fun stop(project: Project? = null) {
@@ -151,15 +156,19 @@ class PushToTalkAction : AnAction() {
             val target = recordingProject ?: project
             recordingProject = null
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
-            dismissListening()
             val samples = capture.stop()
-            DictationState.set(false)
-            if (samples.isEmpty()) return
+            if (samples.isEmpty()) {
+                status.setPhase(DictationPhase.IDLE)
+                return
+            }
+            // The capture line is closed and whisper is about to run: "Transcribing…".
+            status.setPhase(DictationPhase.TRANSCRIBING)
             try {
                 val wavFile = File(System.getProperty("java.io.tmpdir"), "copilot-voice-${System.currentTimeMillis()}.wav")
                 WavFile.write(wavFile, samples, AudioCapture.DEFAULT_FORMAT)
                 transcribeInBackground(target, wavFile)
             } catch (t: Exception) {
+                status.setPhase(DictationPhase.IDLE)
                 notify(target, VoiceBundle.message("notification.wav.failed", t.message ?: t.javaClass.simpleName), NotificationType.WARNING)
             }
         }
@@ -169,67 +178,73 @@ class PushToTalkAction : AnAction() {
             val resolved = ModelManager.resolveActive(null, requestedModelId)
             val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
                 override fun run(indicator: ProgressIndicator) {
-                    // Resolve the model here, off the EDT: restoring the bundled model copies and
-                    // checksums a ~75 MB file.
-                    var model = resolved
-                    var activeModelId = requestedModelId
-                    if (model == null) {
-                        if (requestedModelId == ModelManager.BUNDLED_MODEL) {
-                            // The selected model is the bundled one but hasn't been extracted to
-                            // disk yet (fresh install): extract it. This is the expected first-use
-                            // path, not a fallback, so no "we fell back" notification.
-                            val bundled = ModelManager.installBundledModel()
-                            if (bundled != null) {
-                                model = bundled
-                                activeModelId = ModelManager.BUNDLED_MODEL
-                                log.info("extracting bundled model for first use: $bundled")
-                            }
-                        } else {
-                            // The selected model isn't installed (e.g. no network to download it):
-                            // fall back to the model bundled inside the plugin.
-                            val bundled = ModelManager.installBundledModel()
-                            if (bundled != null) {
-                                model = bundled
-                                activeModelId = ModelManager.BUNDLED_MODEL
-                                log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
-                                notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
-                            }
-                        }
-                    }
-                    if (model == null) {
-                        log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
-                        notify(
-                            project,
-                            VoiceBundle.message("notification.no.model", ModelManager.modelsDir()),
-                            NotificationType.WARNING,
-                            openSettingsAction(project),
-                        )
-                        wavFile.delete()
-                        return
-                    }
                     try {
-                        log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
-                        val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
-                        val text = WhisperCliEngine().transcribe(
-                            wavFile, model,
-                            language = language, useGpu = useGpu(), threads = threads(),
-                            indicator = indicator,
-                        )
-                        log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
-                        if (text.isBlank()) {
-                            notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
-                        } else {
-                            deliverToChat(project, text)
+                        // Resolve the model here, off the EDT: restoring the bundled model copies and
+                        // checksums a ~75 MB file.
+                        var model = resolved
+                        var activeModelId = requestedModelId
+                        if (model == null) {
+                            if (requestedModelId == ModelManager.BUNDLED_MODEL) {
+                                // The selected model is the bundled one but hasn't been extracted to
+                                // disk yet (fresh install): extract it. This is the expected first-use
+                                // path, not a fallback, so no "we fell back" notification.
+                                val bundled = ModelManager.installBundledModel()
+                                if (bundled != null) {
+                                    model = bundled
+                                    activeModelId = ModelManager.BUNDLED_MODEL
+                                    log.info("extracting bundled model for first use: $bundled")
+                                }
+                            } else {
+                                // The selected model isn't installed (e.g. no network to download it):
+                                // fall back to the model bundled inside the plugin.
+                                val bundled = ModelManager.installBundledModel()
+                                if (bundled != null) {
+                                    model = bundled
+                                    activeModelId = ModelManager.BUNDLED_MODEL
+                                    log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
+                                    notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
+                                }
+                            }
                         }
-                    } catch (t: Throwable) {
-                        if (indicator.isCanceled) {
-                            log.info("transcription cancelled by user")
-                        } else {
-                            log.error("transcribe threw", t)
-                            notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                        if (model == null) {
+                            log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
+                            notify(
+                                project,
+                                VoiceBundle.message("notification.no.model", ModelManager.modelsDir()),
+                                NotificationType.WARNING,
+                                openSettingsAction(project),
+                            )
+                            wavFile.delete()
+                            return
+                        }
+                        try {
+                            log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
+                            val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
+                            val text = WhisperCliEngine().transcribe(
+                                wavFile, model,
+                                language = language, useGpu = useGpu(), threads = threads(),
+                                indicator = indicator,
+                            )
+                            log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
+                            if (text.isBlank()) {
+                                notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
+                            } else {
+                                deliverToChat(project, text)
+                            }
+                        } catch (t: Throwable) {
+                            if (indicator.isCanceled) {
+                                log.info("transcription cancelled by user")
+                            } else {
+                                log.error("transcribe threw", t)
+                                notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                            }
+                        } finally {
+                            wavFile.delete()
                         }
                     } finally {
-                        wavFile.delete()
+                        // Every exit path (delivered, no model, no speech, cancelled, failed)
+                        // returns to IDLE so the status bar widget hides again.
+                        status.setPhase(DictationPhase.IDLE)
                     }
                 }
             }
@@ -283,16 +298,6 @@ class PushToTalkAction : AnAction() {
                 ShowSettingsUtil.getInstance().showSettingsDialog(event.project ?: project, VoiceBundle["settings.title"])
             }
 
-        private fun dismissListening() {
-            val n = listeningNotification ?: return
-            listeningNotification = null
-            if (java.awt.EventQueue.isDispatchThread()) {
-                n.expire()
-            } else {
-                ApplicationManager.getApplication().invokeLater { n.expire() }
-            }
-        }
-
         private fun notify(
             project: Project?,
             content: String,
@@ -311,6 +316,17 @@ class PushToTalkAction : AnAction() {
                 ApplicationManager.getApplication().invokeLater { notification.notify(target) }
             }
             return notification
+        }
+    }
+
+    companion object {
+        /**
+         * Stops the in-flight recording from anywhere (the status bar widget's click handler).
+         * The manual escape hatch for the stuck-recording case (issue #5) if a key release was
+         * lost.
+         */
+        fun stopRecording() {
+            PttState.stop()
         }
     }
 }

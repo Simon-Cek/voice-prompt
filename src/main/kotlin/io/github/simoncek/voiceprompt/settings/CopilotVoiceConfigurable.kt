@@ -1,7 +1,9 @@
 package io.github.simoncek.voiceprompt.settings
 
 import io.github.simoncek.voiceprompt.VoiceBundle
-import io.github.simoncek.voiceprompt.audio.DictationState
+import io.github.simoncek.voiceprompt.state.DictationPhase
+import io.github.simoncek.voiceprompt.state.DictationStatus
+import io.github.simoncek.voiceprompt.state.isCapturing
 import io.github.simoncek.voiceprompt.audio.MicrophoneTester
 import io.github.simoncek.voiceprompt.stt.ModelManager
 import io.github.simoncek.voiceprompt.stt.WhisperLanguage
@@ -59,7 +61,7 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
     private var micComponent: JComponent? = null
     private var testButton: JButton? = null
     private var hintCell: Cell<JBLabel>? = null
-    private val micTestEnabled = AtomicBooleanProperty(!DictationState.isRecording)
+    private val micTestEnabled = AtomicBooleanProperty(!DictationStatus.instance.isCapturing)
 
     // The IntelliJ framework reuses one CopilotVoiceConfigurable across settings sessions —
     // createPanel() runs again after disposeUIResources(). Registering a child on an already-
@@ -95,8 +97,10 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         if (current != null) Disposer.dispose(current)
         val rowsDisposable = Disposer.newDisposable()
         session = rowsDisposable
-        // Keep the Test button in step with the recording state; removed with the session.
-        DictationState.addListener(rowsDisposable) { micTestEnabled.set(!it) }
+        // Keep the Test button in step with the dictation state; removed with the session.
+        val dictationListener: (DictationPhase) -> Unit = { phase -> micTestEnabled.set(!phase.isCapturing) }
+        DictationStatus.instance.addListener(dictationListener)
+        Disposer.register(rowsDisposable) { DictationStatus.instance.removeListener(dictationListener) }
         tester = MicrophoneTester(
             parent = rowsDisposable,
             onLevel = { level ->
@@ -133,9 +137,15 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                         .comment(VoiceBundle["settings.auto.send.hint"])
                 }
 
+                row {
+                    checkBox(VoiceBundle["settings.statusbar.idle"])
+                        .bindSelected({ s.showIdleIndicator }, { s.showIdleIndicator = it })
+                        .comment(VoiceBundle["settings.statusbar.idle.hint"])
+                }
+
                 row(VoiceBundle["settings.input.title"]) {
                     // The mic test can't run while a dictation recording is in progress.
-                    micTestEnabled.set(!DictationState.isRecording)
+                    micTestEnabled.set(!DictationStatus.instance.isCapturing)
                     val mic = comboBox(inputDeviceNames())
                     micComponent = mic.component
                     mic.bindItem(

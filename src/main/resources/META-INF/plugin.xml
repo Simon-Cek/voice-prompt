@@ -131,6 +131,11 @@
 
         <applicationService serviceImplementation="io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings"/>
         <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" key="settings.title" instance="io.github.simoncek.voiceprompt.settings.CopilotVoiceConfigurable"/>
+        <applicationService serviceImplementation="io.github.simoncek.voiceprompt.state.DictationStatus"/>
+
+        <!-- Persistent recording indicator on the status bar (issue #5). One widget instance per
+             project window; all of them are views of the DictationStatus application service. -->
+        <statusBarWidgetFactory implementation="io.github.simoncek.voiceprompt.statusbar.RecordingStatusWidgetFactory" id="VoicePromptRecordingStatus"/>
     </extensions>
 
     <actions>
