@@ -32,15 +32,15 @@ import com.intellij.openapi.progress.Task
 import java.awt.AWTEvent
 import java.awt.Toolkit
 import java.awt.event.AWTEventListener
-import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
+import java.awt.event.WindowEvent
 import java.io.File
 
 class PushToTalkAction : AnAction() {
 
     override fun actionPerformed(event: AnActionEvent) {
         PttState.ensureKeyWatcherInstalled()
-        PttState.onShortcutPressed(event.project)
+        PttState.onShortcutPressed(event)
     }
 
     private object PttState {
@@ -51,7 +51,6 @@ class PushToTalkAction : AnAction() {
 
         private val capture = AudioCapture().also { it.onMaxDurationReached = { stop() } }
         @Volatile private var watcherInstalled = false
-        private val downKeys = HashMap<Int, Int>()
         private val chatSink = ChatSinkChain.default()
         @Volatile private var listeningNotification: Notification? = null
         /**
@@ -60,6 +59,8 @@ class PushToTalkAction : AnAction() {
          * and notifications must target this project — not just the first-opened one.
          */
         @Volatile private var recordingProject: Project? = null
+        /** Ignores auto-repeat re-fires of the shortcut while the key is still held. */
+        private val triggerGuard = ShortcutTriggerGuard()
 
         val isRecording: Boolean get() = capture.isRecording()
 
@@ -68,27 +69,32 @@ class PushToTalkAction : AnAction() {
             watcherInstalled = true
             Toolkit.getDefaultToolkit().addAWTEventListener(object : AWTEventListener {
                 override fun eventDispatched(event: AWTEvent) {
-                    val e = event as? KeyEvent ?: return
-                    when (e.id) {
-                        KeyEvent.KEY_PRESSED -> onKeyPressed(e)
-                        KeyEvent.KEY_RELEASED -> onKeyReleased(e)
+                    when (event) {
+                        is KeyEvent -> if (event.id == KeyEvent.KEY_RELEASED) onKeyReleased(event)
+                        is WindowEvent -> if (event.id == WindowEvent.WINDOW_DEACTIVATED) onWindowDeactivated()
                     }
                 }
-            }, AWTEvent.KEY_EVENT_MASK)
-        }
-
-        private fun onKeyPressed(e: KeyEvent) {
-            val wasDown = downKeys[e.keyCode] ?: 0
-            downKeys[e.keyCode] = wasDown + 1
+            }, AWTEvent.KEY_EVENT_MASK or AWTEvent.WINDOW_EVENT_MASK)
         }
 
         private fun onKeyReleased(e: KeyEvent) {
-            downKeys[e.keyCode]?.let { count ->
-                if (count <= 1) downKeys.remove(e.keyCode) else downKeys[e.keyCode] = count - 1
+            val stroke = currentShortcut()?.firstKeyStroke ?: return
+            if (e.keyCode == stroke.keyCode) triggerGuard.mainKeyReleased()
+            // Hold mode: the recording ends as soon as *any* key of the shortcut is released.
+            // A release is a single event, so — unlike the old press counter — auto-repeat
+            // cannot wedge it "still held".
+            if (CopilotVoiceSettings.instance.mode == RecordingMode.HOLD && isRecording &&
+                e.keyCode in shortcutKeyCodes(stroke.keyCode, stroke.modifiers)
+            ) {
+                stop()
             }
-            if (CopilotVoiceSettings.instance.mode != RecordingMode.HOLD) return
-            val shortcut = currentShortcut() ?: return
-            if (isRecording && !comboStillHeld(shortcut)) stop()
+        }
+
+        private fun onWindowDeactivated() {
+            // Safety net for a lost key-up (e.g. the Alt key activating a menu before its
+            // release is seen): in Hold mode we would otherwise wait forever for a release
+            // that never comes and stay stuck in the "listening" state.
+            if (CopilotVoiceSettings.instance.mode == RecordingMode.HOLD && isRecording) stop()
         }
 
         private fun activeProject(): Project? = ProjectManager.getInstance().openProjects.firstOrNull()
@@ -97,20 +103,13 @@ class PushToTalkAction : AnAction() {
             ActionManager.getInstance().getAction(ACTION_ID)?.shortcutSet?.shortcuts
                 ?.filterIsInstance<KeyboardShortcut>()?.firstOrNull()
 
-        private fun comboStillHeld(shortcut: KeyboardShortcut): Boolean {
-            val stroke = shortcut.firstKeyStroke ?: return false
-            if (!isDown(stroke.keyCode)) return false
-            val mods = stroke.modifiers
-            if ((mods and InputEvent.CTRL_MASK) != 0 && !isDown(KeyEvent.VK_CONTROL)) return false
-            if ((mods and InputEvent.SHIFT_MASK) != 0 && !isDown(KeyEvent.VK_SHIFT)) return false
-            if ((mods and InputEvent.META_MASK) != 0 && !isDown(KeyEvent.VK_META)) return false
-            if ((mods and InputEvent.ALT_MASK) != 0 && !isDown(KeyEvent.VK_ALT)) return false
-            return true
-        }
-
-        private fun isDown(vararg codes: Int): Boolean = codes.any { (downKeys[it] ?: 0) > 0 }
-
-        fun onShortcutPressed(project: Project?) {
+        fun onShortcutPressed(event: AnActionEvent) {
+            // A keyboard trigger that arrives while the shortcut's main key has not been released
+            // since the previous trigger is an auto-repeat — or a restart attempt after the 60 s
+            // cap while the key is still held — and is ignored. Mouse, menu and programmatic
+            // triggers carry no KeyEvent input event and always pass.
+            if (event.inputEvent is KeyEvent && !triggerGuard.consume()) return
+            val project = event.project
             when (CopilotVoiceSettings.instance.mode) {
                 RecordingMode.TAP -> if (isRecording) stop(project) else start(project)
                 RecordingMode.HOLD -> if (!isRecording) start(project)
