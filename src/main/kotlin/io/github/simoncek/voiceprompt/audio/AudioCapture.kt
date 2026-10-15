@@ -1,8 +1,6 @@
 package io.github.simoncek.voiceprompt.audio
 
 import javax.sound.sampled.AudioFormat
-import javax.sound.sampled.AudioSystem
-import javax.sound.sampled.LineUnavailableException
 import javax.sound.sampled.TargetDataLine
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -45,7 +43,7 @@ class AudioCapture(
             throw IllegalStateException("Already recording")
         }
         val dataLine = try {
-            openLine(mixerName)
+            MicrophoneResolver.resolve(mixerName, format)
         } catch (t: Throwable) {
             recording.set(false)
             throw t
@@ -84,17 +82,6 @@ class AudioCapture(
         val bytes = buffer.toByteArray()
         val shorts = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         return ShortArray(shorts.remaining()).also { shorts.get(it) }
-    }
-
-    private fun openLine(mixerName: String?): TargetDataLine {
-        if (mixerName == null) return AudioSystem.getTargetDataLine(format)
-        val info = AudioSystem.getMixerInfo().firstOrNull { it.name.equals(mixerName, ignoreCase = true) }
-            ?: throw LineUnavailableException("Microphone not found: $mixerName")
-        val mixer = AudioSystem.getMixer(info)
-        val targetInfo = mixer.getTargetLineInfo().firstOrNull()
-            ?: throw LineUnavailableException("Mixer does not support capture: ${info.name}")
-        return mixer.getLine(targetInfo) as? TargetDataLine
-            ?: throw LineUnavailableException("Mixer line is not a capture line: ${info.name}")
     }
 
     private fun readLoop(dataLine: TargetDataLine) {

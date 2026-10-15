@@ -7,8 +7,6 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.util.Disposer
 import javax.sound.sampled.AudioFormat
-import javax.sound.sampled.AudioSystem
-import javax.sound.sampled.DataLine
 import javax.sound.sampled.LineUnavailableException
 import javax.sound.sampled.TargetDataLine
 import java.util.concurrent.atomic.AtomicBoolean
@@ -69,7 +67,7 @@ class MicrophoneTester(
         var heardSound = false
         var warned = false
         try {
-            val l = openLine(deviceName, format)
+            val l = MicrophoneResolver.resolve(deviceName, format)
             line = l
             l.open(format)
             l.start()
@@ -95,8 +93,9 @@ class MicrophoneTester(
         } catch (e: Exception) {
             if (!stopping) {
                 when (e) {
+                    // MicrophoneNotFoundException is a LineUnavailableException; match it first.
+                    is MicrophoneNotFoundException -> ui { onError("No microphone found.") }
                     is LineUnavailableException -> ui { onError("The microphone is in use by another app.") }
-                    is IllegalArgumentException -> ui { onError("No microphone found.") }
                     else -> ui { onError("Couldn't start the microphone test.") }
                 }
             }
@@ -117,15 +116,6 @@ class MicrophoneTester(
                 onStopped()
             }
         }
-    }
-
-    // null/blank means the system default microphone (settings store null for the default).
-    private fun openLine(deviceName: String?, format: AudioFormat): TargetDataLine {
-        if (deviceName.isNullOrEmpty()) return AudioSystem.getTargetDataLine(format)
-        val info = AudioSystem.getMixerInfo().firstOrNull { it.name == deviceName }
-            ?: throw IllegalArgumentException("device not found")
-        val lineInfo = DataLine.Info(TargetDataLine::class.java, format)
-        return AudioSystem.getMixer(info).getLine(lineInfo) as TargetDataLine
     }
 
     private fun rms(buf: ByteArray, len: Int): Double {
