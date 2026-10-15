@@ -9,6 +9,8 @@ import com.intellij.openapi.util.SystemInfo
 import java.io.File
 import java.io.IOException
 import java.nio.file.Path
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 class WhisperCliEngine {
 
@@ -40,29 +42,36 @@ class WhisperCliEngine {
             throw TranscriptionException("Could not start whisper-cli at $cli", t)
         }
 
-        // CapturingProcessHandler reads stdout/stderr concurrently, so a process that hangs with
-        // its streams open cannot block us past [timeoutMs]; on timeout or on cancellation via
-        // [indicator] it destroys the process and flags the output accordingly.
-        val output = if (indicator != null) {
-            handler.runProcessWithProgressIndicator(indicator, timeoutMs.toInt())
-        } else {
-            handler.runProcess(timeoutMs.toInt())
-        }
+        // Track the live handler so DictationSession.dispose() can kill a whisper-cli that is
+        // still running when the IDE shuts down or the plugin is unloaded (review #6).
+        activeHandlers += handler
+        try {
+            // CapturingProcessHandler reads stdout/stderr concurrently, so a process that hangs with
+            // its streams open cannot block us past [timeoutMs]; on timeout or on cancellation via
+            // [indicator] it destroys the process and flags the output accordingly.
+            val output = if (indicator != null) {
+                handler.runProcessWithProgressIndicator(indicator, timeoutMs.toInt())
+            } else {
+                handler.runProcess(timeoutMs.toInt())
+            }
 
-        if (output.isTimeout) {
-            throw TranscriptionException("whisper-cli timed out after ${timeoutMs} ms")
+            if (output.isTimeout) {
+                throw TranscriptionException("whisper-cli timed out after ${timeoutMs} ms")
+            }
+            if (output.isCancelled) {
+                throw TranscriptionException("whisper-cli was cancelled")
+            }
+            val exitCode = output.exitCode
+            val stderr = output.stderr.trim()
+            log.info("whisper-cli exit=$exitCode stdoutLen=${output.stdout.length} stderr='${stderr.take(300)}'")
+            if (exitCode != 0) {
+                val detail = stderr.lineSequence().toList().takeLast(5).joinToString(" | ")
+                throw TranscriptionException("whisper-cli exited with code $exitCode${if (detail.isNotEmpty()) ": $detail" else ""}")
+            }
+            return normalizeTranscript(output.stdout)
+        } finally {
+            activeHandlers -= handler
         }
-        if (output.isCancelled) {
-            throw TranscriptionException("whisper-cli was cancelled")
-        }
-        val exitCode = output.exitCode
-        val stderr = output.stderr.trim()
-        log.info("whisper-cli exit=$exitCode stdoutLen=${output.stdout.length} stderr='${stderr.take(300)}'")
-        if (exitCode != 0) {
-            val detail = stderr.lineSequence().toList().takeLast(5).joinToString(" | ")
-            throw TranscriptionException("whisper-cli exited with code $exitCode${if (detail.isNotEmpty()) ": $detail" else ""}")
-        }
-        return normalizeTranscript(output.stdout)
     }
 
     /**
@@ -95,5 +104,21 @@ class WhisperCliEngine {
         const val DEFAULT_TIMEOUT_MS = 120_000L
         private val BLANK_AUDIO_TOKEN = Regex("\\[BLANK_AUDIO\\]", RegexOption.IGNORE_CASE)
         private val MULTIPLE_SPACES = Regex(" {2,}")
+
+        /** whisper-cli handlers that are running right now (concurrent: more than one may transcribe). */
+        private val activeHandlers: MutableSet<CapturingProcessHandler> =
+            Collections.newSetFromMap(ConcurrentHashMap())
+
+        /**
+         * Kills every whisper-cli process still running. Called from [io.github.simoncek.voiceprompt.actions.DictationSession]
+         * on dispose (IDE shutdown, dynamic plugin unload) so no inference process outlives the
+         * plugin (review #6). Safe to call when nothing is running.
+         */
+        fun killActiveProcesses() {
+            for (handler in activeHandlers) {
+                runCatching { handler.destroyProcess() }
+            }
+            activeHandlers.clear()
+        }
     }
 }

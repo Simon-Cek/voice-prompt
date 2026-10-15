@@ -132,6 +132,9 @@
         <applicationService serviceImplementation="io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings"/>
         <applicationConfigurable parentId="tools" id="CopilotVoiceSettings" key="settings.title" instance="io.github.simoncek.voiceprompt.settings.CopilotVoiceConfigurable"/>
         <applicationService serviceImplementation="io.github.simoncek.voiceprompt.state.DictationStatus"/>
+        <!-- Owns the live dictation session (AWT key watcher, capture line, in-flight transcription);
+             the platform disposes it on IDE shutdown and dynamic plugin unload (issue #6). -->
+        <applicationService serviceImplementation="io.github.simoncek.voiceprompt.actions.DictationSession"/>
 
         <!-- Persistent recording indicator on the status bar (issue #5). One widget instance per
              project window; all of them are views of the DictationStatus application service. -->
