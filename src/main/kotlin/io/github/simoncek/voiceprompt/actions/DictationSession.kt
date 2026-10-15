@@ -18,6 +18,7 @@ import com.intellij.openapi.progress.Task
 import io.github.simoncek.voiceprompt.VoiceBundle
 import io.github.simoncek.voiceprompt.audio.AudioCapture
 import io.github.simoncek.voiceprompt.audio.Beeps
+import io.github.simoncek.voiceprompt.audio.SpeechGate
 import io.github.simoncek.voiceprompt.audio.WavFile
 import io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings
 import io.github.simoncek.voiceprompt.settings.ProcessingMode
@@ -174,6 +175,22 @@ class DictationSession : Disposable {
             status.setPhase(DictationPhase.IDLE)
             return
         }
+        // Pre-inference gates (issue #8): a quick accidental tap or a silent clip must not spawn
+        // a whisper-cli process and send a hallucinated transcript.
+        val sampleRate = AudioCapture.DEFAULT_FORMAT.sampleRate.toInt()
+        if (SpeechGate.durationMs(samples.size, sampleRate) < SpeechGate.MIN_DURATION_MS) {
+            log.info("discarding clip: shorter than ${SpeechGate.MIN_DURATION_MS} ms")
+            noSpeech(target)
+            status.setPhase(DictationPhase.IDLE)
+            return
+        }
+        val rms = SpeechGate.rms(samples)
+        if (rms < SpeechGate.MIN_RMS) {
+            log.info("discarding clip: rms=$rms below the ${SpeechGate.MIN_RMS} speech floor")
+            noSpeech(target)
+            status.setPhase(DictationPhase.IDLE)
+            return
+        }
         // The capture line is closed and whisper is about to run: "Transcribing…".
         status.setPhase(DictationPhase.TRANSCRIBING)
         try {
@@ -240,7 +257,7 @@ class DictationSession : Disposable {
                         )
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
-                            notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
+                            noSpeech(project)
                         } else {
                             deliverToChat(project, text)
                         }
@@ -305,6 +322,11 @@ class DictationSession : Disposable {
 
     private fun fallbackBalloon(project: Project?, text: String) {
         notify(project, VoiceBundle.message("notification.insert.failed", CopilotVersion.describe()) + text, NotificationType.INFORMATION)
+    }
+
+    /** "No speech" balloon — shared by the pre-inference gates (issue #8) and the blank-transcript path. */
+    private fun noSpeech(project: Project?) {
+        notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
     }
 
     /** Balloon action that opens the Voice Prompt settings page (plan Day 2 step 6). */

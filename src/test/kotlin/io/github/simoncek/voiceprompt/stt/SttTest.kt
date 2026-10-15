@@ -50,6 +50,7 @@ class WhisperCliEngineTest {
                 "-f", "/tmp/recording.wav",
                 "-nt",
                 "-l", "en",
+                "--suppress-nst",
                 "--no-gpu",
             ),
             WhisperCliEngine().buildArguments(cli, java.io.File("/tmp/recording.wav"), model, "en"),
@@ -102,6 +103,28 @@ class WhisperCliEngineTest {
     @Test
     fun `blank-audio token matching is case-insensitive`() {
         assertEquals("ok", WhisperCliEngine().normalizeTranscript("[blank_audio] ok"))
+    }
+
+    @Test
+    fun `treats a whole hallucination as no speech`() {
+        val engine = WhisperCliEngine()
+        assertEquals("", engine.normalizeTranscript("Thank you."))
+        assertEquals("", engine.normalizeTranscript("you"))
+        assertEquals("", engine.normalizeTranscript("(music)"))
+        assertEquals("", engine.normalizeTranscript("[Music]"))
+        assertEquals("", engine.normalizeTranscript("(singing)"))
+        assertEquals("", engine.normalizeTranscript("(speech noise)"))
+        assertEquals("", engine.normalizeTranscript("(applause)\n(laughter)"))
+        assertEquals("", engine.normalizeTranscript("you\nyou"))
+    }
+
+    @Test
+    fun `keeps hallucinated phrases inside a real transcript`() {
+        val engine = WhisperCliEngine()
+        assertEquals("Thank you for the help", engine.normalizeTranscript("Thank you for the help"))
+        assertEquals("you are welcome", engine.normalizeTranscript("you are welcome"))
+        assertEquals("OK let's start", engine.normalizeTranscript("OK let's start"))
+        assertEquals("hello", engine.normalizeTranscript("hello"))
     }
 }
 

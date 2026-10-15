@@ -79,12 +79,28 @@ class WhisperCliEngine {
      * with no speech, one per silent segment. Drop the token (and lines left empty by it) so a
      * silent clip returns empty text — the condition callers use to show the "no speech" balloon —
      * while a partly-silent clip keeps its transcribed lines.
+     *
+     * Whisper also hallucinates short phrases on silence and noise ("Thank you.", "you",
+     * "(music)", …, issue #8). `--suppress-nst` handles most of that at inference time; this
+     * blocklist is the backstop for anything that still slips through. Only a transcript made up
+     * *entirely* of such phrases is dropped — "Thank you for the help" must survive.
      */
-    internal fun normalizeTranscript(raw: String): String =
-        raw.lineSequence()
+    internal fun normalizeTranscript(raw: String): String {
+        val text = raw.lineSequence()
             .map { line -> line.replace(BLANK_AUDIO_TOKEN, " ").replace(MULTIPLE_SPACES, " ").trim() }
             .filter { it.isNotEmpty() }
             .joinToString("\n")
+        return if (isHallucination(text)) "" else text
+    }
+
+    /** True when every line of [text] is a known non-speech hallucination (issue #8). */
+    private fun isHallucination(text: String): Boolean {
+        val lines = text.lineSequence()
+            .map { it.trim().trimEnd('.', '!', '?', ' ').lowercase().trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        return lines.isNotEmpty() && lines.all { it in HALLUCINATION_PHRASES }
+    }
 
     fun buildArguments(cli: Path, wavFile: File, model: Path, language: String, useGpu: Boolean = false, threads: Int = 0): List<String> {
         val base = listOf(
@@ -93,6 +109,10 @@ class WhisperCliEngine {
             "-f", wavFile.absolutePath,
             "-nt",
             "-l", language,
+            // Suppress whisper's non-speech tokens like "(music)" on silence/noise (issue #8);
+            // the HALLUCINATION_PHRASES blocklist in normalizeTranscript() is the backstop.
+            // Verified present in the bundled whisper-cli (build b5454).
+            "--suppress-nst",
         )
         // whisper.cpp defaults to just 4 threads; pass -t only when a concrete count is resolved.
         val withThreads = if (threads > 0) base + listOf("-t", threads.toString()) else base
@@ -104,6 +124,23 @@ class WhisperCliEngine {
         const val DEFAULT_TIMEOUT_MS = 120_000L
         private val BLANK_AUDIO_TOKEN = Regex("\\[BLANK_AUDIO\\]", RegexOption.IGNORE_CASE)
         private val MULTIPLE_SPACES = Regex(" {2,}")
+
+        /**
+         * Non-speech output whisper emits on silence or noise (issue #8): its non-speech tags and
+         * the short filler phrases the review names ("Thank you.", "you"). Compared
+         * case-insensitively, with trailing punctuation stripped, against each whole line (see
+         * [isHallucination]). Deliberately short: one-word replies like "ok" are legit dictation
+         * and must survive (see the blank-audio tests).
+         */
+        private val HALLUCINATION_PHRASES = setOf(
+            "(music)", "[music]",
+            "(singing)", "[singing]",
+            "(applause)", "[applause]",
+            "(laughter)", "[laughter]",
+            "(silence)", "[silence]",
+            "(speech noise)", "[speech noise]",
+            "thank you", "you",
+        )
 
         /** whisper-cli handlers that are running right now (concurrent: more than one may transcribe). */
         private val activeHandlers: MutableSet<CapturingProcessHandler> =
