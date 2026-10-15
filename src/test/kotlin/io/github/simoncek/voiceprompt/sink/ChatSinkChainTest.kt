@@ -5,10 +5,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicReference
 
 class ChatSinkChainTest {
 
-    /** A stub sink that records its calls and behaves per [available]/[result]. */
+    /** A stub sink that records its calls and reports [result] (synchronously) via the callback. */
     private class StubSink(
         private val available: Boolean = true,
         private val result: Result<Unit> = Result.success(Unit),
@@ -19,11 +20,11 @@ class ChatSinkChainTest {
 
         override fun isAvailable(project: Project?): Boolean = available
 
-        override fun insert(project: Project?, text: String, autoSend: Boolean): Result<Unit> {
+        override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
             calls++
             lastText = text
             lastAutoSend = autoSend
-            return result
+            onComplete(result)
         }
     }
 
@@ -33,10 +34,31 @@ class ChatSinkChainTest {
 
         override fun isAvailable(project: Project?): Boolean = true
 
-        override fun insert(project: Project?, text: String, autoSend: Boolean): Result<Unit> {
+        override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
             calls++
             throw RuntimeException(message)
         }
+    }
+
+    /** A stub sink that never reports a result — the sink the safety timer exists for. */
+    private class HangingSink : ChatSink {
+        var calls = 0
+
+        override fun isAvailable(project: Project?): Boolean = true
+
+        override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
+            calls++
+            // Deliberately never calls onComplete.
+        }
+    }
+
+    /** Runs [insert] and captures the single completion; the chain always reports exactly one. */
+    private fun insert(chain: ChatSinkChain, autoSend: Boolean = false, text: String = "hi"): Result<Unit> {
+        val result = AtomicReference<Result<Unit>?>(null)
+        chain.insert(null, text, autoSend) { result.set(it) }
+        // Every stub sink in this test completes synchronously (except HangingSink, whose tests
+        // wait for the safety timer), so the result is available by now.
+        return result.get() ?: throw AssertionError("the chain reported no result")
     }
 
     @Test
@@ -45,7 +67,7 @@ class ChatSinkChainTest {
         val second = StubSink()
         val chain = ChatSinkChain(listOf(first, second))
 
-        val result = chain.insert(null, "hello", autoSend = false)
+        val result = insert(chain, text = "hello")
 
         assertTrue(result.isSuccess)
         assertEquals(1, first.calls)
@@ -60,7 +82,9 @@ class ChatSinkChainTest {
         val second = StubSink()
         val chain = ChatSinkChain(listOf(first, second))
 
-        assertTrue(chain.insert(null, "hi", autoSend = true).isSuccess)
+        val result = insert(chain, autoSend = true)
+
+        assertTrue(result.isSuccess)
         assertEquals(0, first.calls)
         assertEquals(1, second.calls)
         assertEquals(true, second.lastAutoSend)
@@ -72,7 +96,7 @@ class ChatSinkChainTest {
         val second = StubSink()
         val chain = ChatSinkChain(listOf(first, second))
 
-        val result = chain.insert(null, "hi", autoSend = false)
+        val result = insert(chain)
 
         assertTrue(result.isSuccess)
         assertEquals(1, first.calls)
@@ -86,7 +110,7 @@ class ChatSinkChainTest {
         val second = StubSink()
         val chain = ChatSinkChain(listOf(first, second))
 
-        val result = chain.insert(null, "hi", autoSend = false)
+        val result = insert(chain)
 
         assertTrue("a throwing sink must not abort the chain", result.isSuccess)
         assertEquals(1, first.calls)
@@ -103,7 +127,7 @@ class ChatSinkChainTest {
             ),
         )
 
-        val result = chain.insert(null, "hi", autoSend = false)
+        val result = insert(chain)
 
         assertFalse(result.isSuccess)
         assertTrue(result.exceptionOrNull() is InputNotFoundException)
@@ -118,7 +142,7 @@ class ChatSinkChainTest {
             ),
         )
 
-        val result = chain.insert(null, "hi", autoSend = false)
+        val result = insert(chain)
 
         assertFalse(result.isSuccess)
         assertTrue(result.exceptionOrNull() is InputNotFoundException)
@@ -128,11 +152,32 @@ class ChatSinkChainTest {
     fun `returns a failure when no sink is available`() {
         val chain = ChatSinkChain(listOf(StubSink(available = false)))
 
-        assertFalse(chain.insert(null, "hi", autoSend = false).isSuccess)
+        assertFalse(insert(chain).isSuccess)
     }
 
     @Test
     fun `an empty chain fails`() {
-        assertFalse(ChatSinkChain(emptyList()).insert(null, "hi", autoSend = false).isSuccess)
+        assertFalse(insert(ChatSinkChain(emptyList())).isSuccess)
+    }
+
+    @Test
+    fun `a sink that never reports is cut off by the safety timer`() {
+        val hanging = HangingSink()
+        val second = StubSink()
+        val chain = ChatSinkChain(listOf(hanging, second), safetyTimeoutMs = 200)
+
+        val result = AtomicReference<Result<Unit>?>(null)
+        chain.insert(null, "hi", autoSend = false) { result.set(it) }
+
+        // The safety timer (EDT) must cut the hanging sink off and report a failure — this is
+        // what guarantees the balloon fallback still fires (review #7).
+        val deadline = System.currentTimeMillis() + 3_000
+        while (result.get() == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+        val outcome = result.get() ?: throw AssertionError("the chain never reported a result")
+        assertFalse(outcome.isSuccess)
+        assertTrue(outcome.exceptionOrNull() is InputNotFoundException)
+        assertEquals(1, hanging.calls)
     }
 }

@@ -285,12 +285,16 @@ class DictationSession : Disposable {
         ApplicationManager.getApplication().invokeLater {
             try {
                 log.info("deliverToChat on EDT: inserting ${text.length} chars")
-                val result = chatSink.insert(project, text, autoSend = CopilotVoiceSettings.instance.autoSend)
-                if (result.isSuccess) {
-                    log.info("deliverToChat: sink insert succeeded")
-                } else {
-                    log.warn("deliverToChat: all sinks failed (${CopilotVersion.describe()}) -> balloon", result.exceptionOrNull())
-                    fallbackBalloon(project, text)
+                // Sinks may complete asynchronously — e.g. only after the tool window has finished
+                // showing (review #7) — so the result, and with it the balloon fallback, arrives
+                // through the callback.
+                chatSink.insert(project, text, autoSend = CopilotVoiceSettings.instance.autoSend) { result ->
+                    if (result.isSuccess) {
+                        log.info("deliverToChat: sink insert succeeded")
+                    } else {
+                        log.warn("deliverToChat: all sinks failed (${CopilotVersion.describe()}) -> balloon", result.exceptionOrNull())
+                        fallbackBalloon(project, text)
+                    }
                 }
             } catch (t: Throwable) {
                 log.error("deliverToChat threw (${CopilotVersion.describe()}) -> balloon", t)

@@ -13,13 +13,25 @@ import javax.swing.text.JTextComponent
 sealed class ChatInput {
     abstract val component: JComponent
 
-    data class Swing(val field: JTextComponent) : ChatInput() {
+    /**
+     * Whether we are confident this component is Copilot's own composer. Auto-send (a synthetic
+     * Enter) is only safe on a verified composer: the locator's generic fallback may match *any*
+     * editable in the window — a search box, for instance — and sending into that is exactly the
+     * risk the review flags (issue #7). Sinks suppress auto-send on unverified inputs.
+     */
+    abstract val verified: Boolean
+
+    data class Swing(
+        val field: JTextComponent,
+        override val verified: Boolean = true,
+    ) : ChatInput() {
         override val component: JComponent = field
     }
 
     data class Editor(
         val editor: com.intellij.openapi.editor.Editor,
         override val component: JComponent,
+        override val verified: Boolean = true,
     ) : ChatInput()
 }
 
@@ -129,13 +141,16 @@ class LenientChatLocator : ChatLocator {
             return ChatInput.Editor(ed, editorField)
         }
 
+        // Unverified tiers: the first editable we can see, whatever it is. The sink will inject
+        // text here, but it must NOT auto-send — in a Copilot-titled window this can be a search
+        // box or any other text field (issue #7).
         editable.firstOrNull { it.isShowing }?.let {
-            log.info("findInput: SELECTED (fallback first-editable showing) ${it.javaClass.name}")
-            return ChatInput.Swing(it)
+            log.info("findInput: SELECTED (fallback first-editable showing, UNVERIFIED) ${it.javaClass.name}")
+            return ChatInput.Swing(it, verified = false)
         }
         editable.firstOrNull { it.isVisible }?.let {
-            log.info("findInput: SELECTED (fallback first-editable visible) ${it.javaClass.name}")
-            return ChatInput.Swing(it)
+            log.info("findInput: SELECTED (fallback first-editable visible, UNVERIFIED) ${it.javaClass.name}")
+            return ChatInput.Swing(it, verified = false)
         }
 
         log.info("findInput: NO input found")
