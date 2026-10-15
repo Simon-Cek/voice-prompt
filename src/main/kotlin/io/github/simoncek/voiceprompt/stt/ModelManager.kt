@@ -1,6 +1,5 @@
 package io.github.simoncek.voiceprompt.stt
 
-import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.util.io.HttpRequests
 import java.io.IOException
@@ -71,7 +70,11 @@ object ModelManager {
     /** Whisper `*.en` models are trained English-only; every other id is multilingual. */
     fun isEnglishOnly(modelId: String): Boolean = modelId.endsWith(".en")
 
-    fun modelsDir(): Path = Paths.get(PathManager.getSystemPath(), "copilot-voice", "models")
+    /**
+     * Shared across IDE products and versions (review P6) via [VoicePromptPaths] — the legacy
+     * per-IDE location is migrated to it on first use.
+     */
+    fun modelsDir(): Path = VoicePromptPaths.modelsDir()
 
     fun modelFile(modelName: String): Path = modelsDir().resolve("ggml-$modelName.bin")
 

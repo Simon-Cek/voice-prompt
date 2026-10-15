@@ -1,6 +1,5 @@
 package io.github.simoncek.voiceprompt.stt
 
-import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.util.SystemInfo
 import java.io.IOException
@@ -64,7 +63,8 @@ object WhisperRuntime {
     }
 
     private fun runtimeTarget(version: String, platformDir: String): Path =
-        Paths.get(PathManager.getSystemPath(), "copilot-voice", "runtime", version, platformDir)
+        // Shared home (review P6): one runtime for every IDE product and version, not one per IDE.
+        VoicePromptPaths.runtimeDir(version, platformDir)
 
     /**
      * Ensures [target] holds the extracted, checksum-verified runtime for [version] and returns
@@ -81,7 +81,7 @@ object WhisperRuntime {
             val marker = target.resolve(VALIDATION_MARKER)
             if (!markerIsValid(marker, version) || !allPresent(target, sums)) {
                 if (!allPresentAndValid(target, sums)) {
-                    extract(target, sums, platformDir)
+                    extractUnderLock(target, sums, platformDir)
                 }
                 writeMarker(marker, version)
             }
@@ -131,6 +131,26 @@ object WhisperRuntime {
             if (sha256(file) != expected) return false
         }
         return true
+    }
+
+    /** The lock name inside the runtime dir, held while a runtime is being extracted. */
+    private const val EXTRACT_LOCK_NAME = ".extract.lock"
+
+    /** How long to wait for another IDE's extraction before giving up on this pass. */
+    private const val EXTRACT_LOCK_TIMEOUT_SECONDS = 120L
+
+    /**
+     * Extracts under a cross-process lock (review P6): the runtime dir is shared across IDEs,
+     * and [LOCK] only serializes within this JVM. The validity pass is repeated under the lock —
+     * if a concurrent IDE finished extracting while we waited, the work is skipped.
+     */
+    private fun extractUnderLock(target: Path, sums: Map<String, String>, platformDir: String) {
+        Files.createDirectories(target)
+        FileLock(target.resolve(EXTRACT_LOCK_NAME), EXTRACT_LOCK_TIMEOUT_SECONDS).use {
+            if (!allPresentAndValid(target, sums)) {
+                extract(target, sums, platformDir)
+            }
+        }
     }
 
     /** Extracts every bundled file into [target], verifying each one's checksum as it goes. */

@@ -356,10 +356,9 @@ object WhisperServerEngine {
 
     /** Where the server's stdout/stderr go (one file, rewritten on each start). */
     internal fun defaultLogFile(): File {
-        val dir = runCatching {
-            java.nio.file.Paths.get(com.intellij.openapi.application.PathManager.getSystemPath(), "copilot-voice")
-        }.getOrNull() ?: java.nio.file.Paths.get(System.getProperty("java.io.tmpdir"), "copilot-voice")
-        runCatching { java.nio.file.Files.createDirectories(dir) }
+        // Under the shared home (review P6), next to the runtime it describes.
+        val dir = VoicePromptPaths.baseDir()
+        java.nio.file.Files.createDirectories(dir)
         return File(dir.toFile(), "whisper-server.log")
     }
 

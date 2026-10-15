@@ -33,6 +33,13 @@ intellijPlatform {
     }
 }
 
+tasks.test {
+    // Review P6: the plugin's shared home (~/.voice-prompt) is redirected into the build
+    // directory for the whole test suite, so no test ever reads or writes the developer's
+    // real home.
+    systemProperty("voiceprompt.home", layout.buildDirectory.dir("test-home").get().asFile.absolutePath)
+}
+
 tasks.verifyPlugin {
     // The verifier JVM is a plain fork: without a cap it takes ~1/4 of physical RAM (7.5 GB here),
     // which under this machine's memory pressure crashed G1 (SIGSEGV in G1ParScanThreadState).
