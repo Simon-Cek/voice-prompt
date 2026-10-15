@@ -199,7 +199,11 @@ class PushToTalkAction : AnAction() {
                     try {
                         log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
                         val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
-                        val text = WhisperCliEngine().transcribe(wavFile, model, language = language, useGpu = useGpu(), threads = threads())
+                        val text = WhisperCliEngine().transcribe(
+                            wavFile, model,
+                            language = language, useGpu = useGpu(), threads = threads(),
+                            indicator = indicator,
+                        )
                         log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                         if (text.isBlank()) {
                             notify(project, VoiceBundle["notification.no.speech"], NotificationType.INFORMATION)
@@ -207,8 +211,12 @@ class PushToTalkAction : AnAction() {
                             deliverToChat(project, text)
                         }
                     } catch (t: Throwable) {
-                        log.error("transcribe threw", t)
-                        notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                        if (indicator.isCanceled) {
+                            log.info("transcription cancelled by user")
+                        } else {
+                            log.error("transcribe threw", t)
+                            notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                        }
                     } finally {
                         wavFile.delete()
                     }
