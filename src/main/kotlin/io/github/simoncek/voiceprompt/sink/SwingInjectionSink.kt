@@ -46,7 +46,8 @@ class SwingInjectionSink : ChatSink {
             existing.endsWith(" ") || existing.endsWith("\n") -> existing + text
             else -> "$existing $text"
         }
-        log.info("appendToSwing: before='${existing}' after='${next}' (len ${field.document.length} -> ${next.length})")
+        // Log lengths only — never the transcript or the user's existing prompt (AGENTS.md rule 8).
+        log.info("appendToSwing: len ${existing.length} -> ${next.length}")
         field.text = next
         field.caretPosition = field.document.length
     }
