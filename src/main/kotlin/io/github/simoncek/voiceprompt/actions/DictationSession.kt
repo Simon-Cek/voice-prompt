@@ -38,8 +38,11 @@ import java.awt.event.AWTEventListener
 import java.awt.event.KeyEvent
 import java.awt.event.WindowEvent
 import java.io.File
+import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * The owner of the live dictation session: the global key watcher (an AWT event listener), the
@@ -86,6 +89,23 @@ class DictationSession : Disposable {
      * silence means the microphone is not really there, so we stop waiting and say so.
      */
     private val FIRST_SAMPLE_TIMEOUT_MS = 5_000L
+    /**
+     * Review P5: at most one transcription at a time — held across the whole body of
+     * [transcribeBody] (model resolution, inference, delivery), so a queued clip never runs
+     * under a live one. A live clip's cancel or failure would otherwise kill the shared
+     * whisper-server (or double a whisper-cli on the fallback path) out from under the other.
+     * Fair: the longest-waiting clip gets the lock next, so clips queue in order instead of
+     * racing for it.
+     */
+    private val transcriptionLock = ReentrantLock(true)
+    /**
+     * Review P5: transcriptions currently running (or waiting for the lock). The shared phase
+     * returns to IDLE only when this drops to zero — an earlier clip finishing must not hide
+     * the status bar widget while a later one is still running.
+     */
+    private val activeTranscriptions = AtomicInteger(0)
+    /** Wait-loop poll while a queued transcription holds its turn (review P5). */
+    private val TRANSCRIPTION_QUEUE_POLL_MS = 100L
 
     /** Whether the global AWT key watcher is installed (tests and diagnostics). */
     val isKeyWatcherInstalled: Boolean get() = keyWatcher != null
@@ -329,84 +349,132 @@ class DictationSession : Disposable {
     internal var stopWorkDispatcher: ((() -> Unit) -> Unit)? = null
 
     private fun transcribeInBackground(project: Project?, wavFile: File) {
-        val requestedModelId = CopilotVoiceSettings.instance.modelName
         val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
             override fun run(indicator: ProgressIndicator) {
-                try {
-                    // Review P4: resolve the model here, off the EDT — it is disk I/O, and on
-                    // first use restoring the bundled model copies and checksums a ~75 MB file.
-                    // (This used to run on the calling thread, in `stop()`'s path, despite the
-                    // comment claiming otherwise.)
-                    val resolved = ModelManager.resolveActive(null, requestedModelId)
-                    var model = resolved
-                    var activeModelId = requestedModelId
-                    if (model == null) {
-                        if (requestedModelId == ModelManager.BUNDLED_MODEL) {
-                            // The selected model is the bundled one but hasn't been extracted to
-                            // disk yet (fresh install): extract it. This is the expected first-use
-                            // path, not a fallback, so no "we fell back" notification.
-                            val bundled = ModelManager.installBundledModel()
-                            if (bundled != null) {
-                                model = bundled
-                                activeModelId = ModelManager.BUNDLED_MODEL
-                                log.info("extracting bundled model for first use: $bundled")
-                            }
-                        } else {
-                            // The selected model isn't installed (e.g. no network to download it):
-                            // fall back to the model bundled inside the plugin.
-                            val bundled = ModelManager.installBundledModel()
-                            if (bundled != null) {
-                                model = bundled
-                                activeModelId = ModelManager.BUNDLED_MODEL
-                                log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
-                                notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
-                            }
-                        }
-                    }
-                    if (model == null) {
-                        log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
-                        notify(
-                            project,
-                            VoiceBundle.message("notification.no.model", ModelManager.modelsDir()),
-                            NotificationType.WARNING,
-                            openSettingsAction(project),
-                        )
-                        wavFile.delete()
-                        return
-                    }
-                    try {
-                        log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
-                        val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
-                        val text = WhisperServerEngine.transcribe(
-                            wavFile, model,
-                            language = language, useGpu = useGpu(), threads = threads(),
-                            indicator = indicator,
-                        )
-                        log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
-                        if (text.isBlank()) {
-                            noSpeech(project)
-                        } else {
-                            deliverToChat(project, text)
-                        }
-                    } catch (t: Throwable) {
-                        if (indicator.isCanceled) {
-                            log.info("transcription cancelled by user")
-                        } else {
-                            log.error("transcribe threw", t)
-                            notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
-                        }
-                    } finally {
-                        wavFile.delete()
-                    }
-                } finally {
-                    // Every exit path (delivered, no model, no speech, cancelled, failed)
-                    // returns to IDLE so the status bar widget hides again.
-                    status.setPhase(DictationPhase.IDLE)
-                }
+                transcribeBody(indicator, project, wavFile)
             }
         }
         task.queue()
     }
+
+    /**
+     * The full transcription of one clip (review P5): model resolution, the engine call (with
+     * its P2 server path and P3 GPU→CPU net) and the delivery — held under [transcriptionLock],
+     * so at most one transcription runs at a time and the clips finish in the order they
+     * ended. [indicator]'s Cancel button is honoured while a clip waits its turn, not only
+     * during inference.
+     *
+     * Internal so the concurrency test can drive two clips directly, without a task queue.
+     */
+    internal fun transcribeBody(indicator: ProgressIndicator, project: Project?, wavFile: File) {
+        var locked = false
+        try {
+            // Review P5: this clip is now in flight (or about to wait its turn) — the finally
+            // below drops the count on every exit path, and IDLE is set only when the LAST one
+            // leaves.
+            activeTranscriptions.incrementAndGet()
+            while (!transcriptionLock.tryLock()) {
+                // A Cancel pressed while the clip is queued surfaces here the moment it happens
+                // — we do not sit out the predecessor's inference to find out.
+                indicator.checkCanceled()
+                Thread.sleep(TRANSCRIPTION_QUEUE_POLL_MS)
+            }
+            locked = true
+            indicator.checkCanceled()
+            val requestedModelId = CopilotVoiceSettings.instance.modelName
+            // Review P4: resolve the model here, off the EDT — it is disk I/O, and on first
+            // use restoring the bundled model copies and checksums a ~75 MB file. (This used
+            // to run on the calling thread, in `stop()`'s path, despite the comment claiming
+            // otherwise.)
+            val resolved = ModelManager.resolveActive(null, requestedModelId)
+            var model = resolved
+            var activeModelId = requestedModelId
+            if (model == null) {
+                if (requestedModelId == ModelManager.BUNDLED_MODEL) {
+                    // The selected model is the bundled one but hasn't been extracted to disk
+                    // yet (fresh install): extract it. This is the expected first-use path, not
+                    // a fallback, so no "we fell back" notification.
+                    val bundled = ModelManager.installBundledModel()
+                    if (bundled != null) {
+                        model = bundled
+                        activeModelId = ModelManager.BUNDLED_MODEL
+                        log.info("extracting bundled model for first use: $bundled")
+                    }
+                } else {
+                    // The selected model isn't installed (e.g. no network to download it): fall
+                    // back to the model bundled inside the plugin.
+                    val bundled = ModelManager.installBundledModel()
+                    if (bundled != null) {
+                        model = bundled
+                        activeModelId = ModelManager.BUNDLED_MODEL
+                        log.info("selected model '$requestedModelId' not installed; using bundled $bundled")
+                        notify(project, VoiceBundle["notification.bundled.fallback"], NotificationType.INFORMATION)
+                    }
+                }
+            }
+            if (model == null) {
+                log.warn("no active model found; modelsDir=${ModelManager.modelsDir()}")
+                notify(
+                    project,
+                    VoiceBundle.message("notification.no.model", ModelManager.modelsDir()),
+                    NotificationType.WARNING,
+                    openSettingsAction(project),
+                )
+                wavFile.delete()
+                return
+            }
+            try {
+                log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
+                val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
+                val text = engineTranscribe?.invoke(wavFile, model, language, indicator)
+                    ?: WhisperServerEngine.transcribe(
+                        wavFile, model,
+                        language = language, useGpu = useGpu(), threads = threads(),
+                        indicator = indicator,
+                    )
+                log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
+                if (text.isBlank()) {
+                    noSpeech(project)
+                } else {
+                    deliverTranscript?.invoke(project, text) ?: deliverToChat(project, text)
+                }
+            } catch (t: Throwable) {
+                if (indicator.isCanceled) {
+                    log.info("transcription cancelled by user")
+                } else {
+                    log.error("transcribe threw", t)
+                    notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
+                }
+            } finally {
+                wavFile.delete()
+            }
+        } finally {
+            if (locked) {
+                transcriptionLock.unlock()
+            }
+            // Review P5: every exit path (delivered, no model, no speech, cancelled, failed —
+            // including a cancel while queued) drops the counter, and the shared phase returns
+            // to IDLE only when the LAST queued clip has finished — an earlier clip ending
+            // first must not hide the status bar widget while a later one is still running.
+            if (activeTranscriptions.decrementAndGet() == 0) {
+                status.setPhase(DictationPhase.IDLE)
+            }
+        }
+    }
+
+    /**
+     * Test seam for [transcribeBody] (review P5): substitutes the engine call so the
+     * concurrency test can hold one clip mid-"inference" without a model, a binary or a
+     * server. Null (the default) = the real [WhisperServerEngine.transcribe] path (P2 + P3).
+     */
+    internal var engineTranscribe: ((wavFile: File, model: Path, language: String, indicator: ProgressIndicator) -> String)? = null
+
+    /**
+     * Test seam for [transcribeBody] (review P5): substitutes [deliverToChat] so the
+     * concurrency test can record delivery order without a Copilot tool window.
+     * Null (the default) = the real sink chain + balloon fallback.
+     */
+    internal var deliverTranscript: ((project: Project?, text: String) -> Unit)? = null
 
     /** Whether to run inference on the GPU for the user's Processing choice. */
     private fun useGpu(): Boolean {
