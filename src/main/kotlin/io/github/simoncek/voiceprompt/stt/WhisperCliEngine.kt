@@ -18,6 +18,15 @@ class WhisperCliEngine {
 
     class TranscriptionException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
+    /**
+     * Transcribes [wavFile] with a one-shot whisper-cli run.
+     *
+     * Review P3: with the GPU on (the "Automatic" default whenever a Vulkan backend is bundled)
+     * a weak iGPU or a flaky driver can make the run fail where the same audio transcribes fine
+     * on CPU. A non-zero exit with the GPU on therefore retries the utterance once with
+     * `--no-gpu`; a timeout or a user cancellation does not retry (the second run would just
+     * time out / cancel again).
+     */
     fun transcribe(
         wavFile: File,
         model: Path,
@@ -27,8 +36,34 @@ class WhisperCliEngine {
         threads: Int = 0,
         /** The task's indicator: its Cancel button aborts the run and kills the process. Null for unattended calls. */
         indicator: ProgressIndicator? = null,
+    ): String = runOnce(WhisperRuntime.cliPath(), wavFile, model, language, timeoutMs, useGpu, threads, indicator)
+
+    /**
+     * Test seam for [transcribe]: the same path against an explicit CLI binary, so the review-P3
+     * retry tests can drive a fake CLI that fails on the GPU and answers on the CPU.
+     */
+    internal fun transcribeWithCli(
+        cli: Path,
+        wavFile: File,
+        model: Path,
+        language: String,
+        timeoutMs: Long,
+        useGpu: Boolean,
+        threads: Int,
+        indicator: ProgressIndicator?,
+    ): String = runOnce(cli, wavFile, model, language, timeoutMs, useGpu, threads, indicator)
+
+    /** One whisper-cli invocation; the review-P3 GPU→CPU retry lives at its non-zero-exit point. */
+    private fun runOnce(
+        cli: Path,
+        wavFile: File,
+        model: Path,
+        language: String,
+        timeoutMs: Long,
+        useGpu: Boolean,
+        threads: Int,
+        indicator: ProgressIndicator?,
     ): String {
-        val cli = WhisperRuntime.cliPath()
         val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language, useGpu, threads))
             .withWorkDirectory(WhisperRuntime.runtimeDir(cli))
         if (SystemInfo.isLinux || SystemInfo.isMac) {
@@ -65,6 +100,19 @@ class WhisperCliEngine {
             val stderr = output.stderr.trim()
             log.info("whisper-cli exit=$exitCode stdoutLen=${output.stdout.length} stderr='${stderr.take(300)}'")
             if (exitCode != 0) {
+                if (useGpu) {
+                    // Review P3: the GPU run failed (weak iGPU / flaky driver); the CPU run of the
+                    // same utterance may still work. One retry, then a combined error below.
+                    log.warn("whisper-cli exited $exitCode on the GPU; retrying once with --no-gpu")
+                    return try {
+                        runOnce(cli, wavFile, model, language, timeoutMs, false, threads, indicator)
+                    } catch (cpuFailure: TranscriptionException) {
+                        throw TranscriptionException(
+                            "whisper-cli failed on the GPU (exit $exitCode) and again on the CPU: ${cpuFailure.message}",
+                            cpuFailure,
+                        )
+                    }
+                }
                 val detail = stderr.lineSequence().toList().takeLast(5).joinToString(" | ")
                 throw TranscriptionException("whisper-cli exited with code $exitCode${if (detail.isNotEmpty()) ": $detail" else ""}")
             }

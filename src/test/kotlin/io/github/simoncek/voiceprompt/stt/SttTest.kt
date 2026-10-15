@@ -583,3 +583,271 @@ class WhisperServerIntegrationTest {
         )
     }
 }
+
+/**
+ * Review P3: "Automatic" runs the GPU build whenever a Vulkan backend is bundled, without
+ * knowing a usable device exists — on a weak iGPU or a flaky driver the GPU run fails where
+ * the CPU is fine. whisper-cli must therefore retry a non-zero exit once with `--no-gpu`, and
+ * an explicit CPU failure must not retry at all.
+ *
+ * Driven with a fake CLI (a POSIX shell script standing in for whisper-cli) that honours
+ * `--no-gpu` the way the real one does. The engine runs it with the runtime dir as its working
+ * directory, so the script records each invocation in a `calllog` file right next to itself —
+ * the tests assert exactly which runs happened.
+ */
+class WhisperCliGpuRetryTest {
+
+    private var dir: Path? = null
+    private var wav: File? = null
+
+    @Before
+    fun setUp() {
+        Assume.assumeFalse("the fake CLI needs a POSIX shell", SystemInfo.isWindows)
+        val d = Files.createTempDirectory("vp-cli-retry-test")
+        d.toFile().deleteOnExit()
+        dir = d
+        val w = File(d.toFile(), "recording.wav")
+        w.writeBytes(byteArrayOf(1, 2, 3, 4))
+        w.deleteOnExit()
+        wav = w
+    }
+
+    @After
+    fun tearDown() {
+        dir?.toFile()?.deleteRecursively()
+    }
+
+    /**
+     * A whisper-cli stand-in. `gpuFails=true`: fails on the GPU, answers on the CPU.
+     * `gpuFails=false`: fails regardless of the backend. Every invocation appends its
+     * `--no-gpu` flag to `calllog` (the engine's working directory is the script's parent).
+     * Shell variables are spliced via [D] so the template stays plain Kotlin interpolation.
+     */
+    private fun fakeCli(gpuFails: Boolean): Path {
+        val D = '$'
+        val body = if (gpuFails) """
+            if [ "${D}nogpu" = "0" ]; then
+              echo "ggml_vulkan: no device found" >&2
+              exit 3
+            fi
+            echo "cpu says hi"
+        """.trimIndent() else """
+            echo "boom on both" >&2
+            exit 7
+        """.trimIndent()
+        val script = dir!!.resolve("whisper-cli")
+        Files.writeString(
+            script,
+            """
+                #!/bin/sh
+                nogpu=0
+                for a in "${D}@"; do [ "${D}a" = "--no-gpu" ] && nogpu=1; done
+                echo "nogpu=${D}nogpu" >> calllog
+                $body
+            """.trimIndent(),
+        )
+        val perms = Files.getPosixFilePermissions(script)
+        perms.add(PosixFilePermission.OWNER_EXECUTE)
+        perms.add(PosixFilePermission.GROUP_EXECUTE)
+        perms.add(PosixFilePermission.OTHERS_EXECUTE)
+        Files.setPosixFilePermissions(script, perms)
+        return script
+    }
+
+    private fun calllogLines(): List<String> = Files.readAllLines(dir!!.resolve("calllog"))
+
+    private fun transcribe(cli: Path, useGpu: Boolean): String =
+        WhisperCliEngine().transcribeWithCli(cli, wav!!, Paths.get("/models/ggml-tiny.en.bin"), "en", 10_000, useGpu, 0, null)
+
+    @Test
+    fun `a gpu failure retries once with --no-gpu and returns the cpu result`() {
+        val text = transcribe(fakeCli(gpuFails = true), useGpu = true)
+        assertEquals("the cpu retry's answer must be returned", "cpu says hi", text)
+        assertEquals(
+            "exactly two runs: the failed GPU one, then the CPU retry",
+            listOf("nogpu=0", "nogpu=1"),
+            calllogLines(),
+        )
+    }
+
+    @Test
+    fun `a failure that survives the cpu retry reports both failures and does not loop`() {
+        val failure = try {
+            transcribe(fakeCli(gpuFails = false), useGpu = true)
+            error("expected the GPU+CPU failures to throw")
+        } catch (t: WhisperCliEngine.TranscriptionException) {
+            t
+        }
+        assertTrue("the error must name the GPU failure: ${failure.message}", failure.message!!.contains("GPU (exit 7)"))
+        assertTrue("the error must name the CPU failure: ${failure.message}", failure.message!!.contains("CPU"))
+        assertEquals("the retry happens exactly once", listOf("nogpu=0", "nogpu=1"), calllogLines())
+    }
+
+    @Test
+    fun `an explicit cpu failure is not retried`() {
+        val failure = try {
+            transcribe(fakeCli(gpuFails = false), useGpu = false)
+            error("expected the CPU failure to throw")
+        } catch (t: WhisperCliEngine.TranscriptionException) {
+            t
+        }
+        assertTrue("the error must carry the exit code: ${failure.message}", failure.message!!.contains("exited with code 7"))
+        assertEquals("an explicit CPU failure must not retry", listOf("nogpu=1"), calllogLines())
+    }
+}
+
+/**
+ * Review P3, server path: the GPU-backed whisper-server can fail a request on a weak iGPU or
+ * flaky driver. The engine must restart the server on CPU (`--no-gpu`) and retry the utterance
+ * once — not drop straight to the CLI (which would re-load the model and lose the warm
+ * process).
+ *
+ * Driven with a fake server (a python3 HTTP stand-in for whisper-server) that honours
+ * `--no-gpu` the way the real one does. The engine starts and queries the fake with its real
+ * launch + request path, so this exercises the real retry orchestration; `allowFallback=false`
+ * keeps the CLI from masking anything (the lesson of the P2 framing bug).
+ */
+class WhisperServerGpuRetryTest {
+
+    private var dir: Path? = null
+    private var wav: File? = null
+
+    @Before
+    fun setUp() {
+        Assume.assumeFalse("the fake server needs a POSIX shell", SystemInfo.isWindows)
+        Assume.assumeTrue(
+            "python3 is available for the fake server",
+            runCatching { ProcessBuilder("python3", "--version").start().destroy() }.isSuccess,
+        )
+        val d = Files.createTempDirectory("vp-server-retry-test")
+        d.toFile().deleteOnExit()
+        dir = d
+        val w = File(d.toFile(), "recording.wav")
+        w.writeBytes(byteArrayOf(1, 2, 3, 4))
+        w.deleteOnExit()
+        wav = w
+    }
+
+    @After
+    fun tearDown() {
+        WhisperServerEngine.shutdown()
+        dir?.toFile()?.deleteRecursively()
+    }
+
+    /**
+     * A whisper-server stand-in: `/health` answers 200 once up (like the real server after
+     * model load); `/inference` honours the `--no-gpu` launch flag, failing or answering
+     * exactly as the test configures. Every start appends a `FAKE-SERVER` line to `starts.log`
+     * in its working directory (the engine runs the server with the binary's parent dir as
+     * the working directory) — the tests read the start sequence from that file, because the
+     * engine's own log file is truncated on each launch (JDK 25 `RedirectOutput` semantics).
+     */
+    private fun fakeServer(gpuOk: Boolean, cpuOk: Boolean): Path {
+        val python = """
+            #!/usr/bin/env python3
+            import sys
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+
+            args = sys.argv[1:]
+            no_gpu = "--no-gpu" in args
+            port = int(args[args.index("--port") + 1])
+            GPU_OK = {gpuOk}
+            CPU_OK = {cpuOk}
+
+            with open("starts.log", "a") as f:
+                f.write("FAKE-SERVER gpu=" + ("false" if no_gpu else "true") + "\n")
+
+            class Handler(BaseHTTPRequestHandler):
+                def _send(self, code, body):
+                    data = body.encode()
+                    self.send_response(code)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def do_GET(self):
+                    if self.path == "/health":
+                        self._send(200, '{"status": "ok"}')
+                    else:
+                        self._send(404, "not found")
+
+                def do_POST(self):
+                    self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                    if self.path != "/inference":
+                        self._send(404, "not found")
+                    elif no_gpu:
+                        self._send(200 if CPU_OK else 500, "cpu says hi" if CPU_OK else "cpu broken")
+                    else:
+                        self._send(200 if GPU_OK else 500, "gpu says hi" if GPU_OK else "gpu broken")
+
+                def log_message(self, *args):
+                    pass
+
+            HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+        """.trimIndent()
+            .replace("{gpuOk}", if (gpuOk) "True" else "False")
+            .replace("{cpuOk}", if (cpuOk) "True" else "False")
+        val script = dir!!.resolve("whisper-server")
+        Files.writeString(script, python)
+        val perms = Files.getPosixFilePermissions(script)
+        perms.add(PosixFilePermission.OWNER_EXECUTE)
+        perms.add(PosixFilePermission.GROUP_EXECUTE)
+        perms.add(PosixFilePermission.OTHERS_EXECUTE)
+        Files.setPosixFilePermissions(script, perms)
+        return script
+    }
+
+    private fun transcribe(binary: Path, useGpu: Boolean): String = WhisperServerEngine.transcribeInternal(
+        wavFile = wav!!,
+        model = Paths.get("/models/ggml-tiny.en.bin"),
+        language = WhisperLanguage.ENGLISH.code,
+        timeoutMs = 30_000,
+        useGpu = useGpu,
+        threads = 0,
+        indicator = null,
+        serverBinary = binary,
+        logFile = File(dir!!.toFile(), "server.log"),
+        // No CLI fallback: the server-side retry alone must produce the answer or throw,
+        // so the CLI cannot mask what the server path actually did (the lesson of P2).
+        allowFallback = false,
+    )
+
+    private fun startSequence(): List<String> =
+        Files.readAllLines(File(dir!!.toFile(), "starts.log").toPath())
+            .filter { it.startsWith("FAKE-SERVER") }
+
+    @Test
+    fun `a gpu request failure restarts the server on cpu and returns the cpu result`() {
+        val text = transcribe(fakeServer(gpuOk = false, cpuOk = true), useGpu = true)
+        assertEquals("the cpu retry's answer must be returned", "cpu says hi", text)
+        assertEquals(
+            "the GPU server runs, fails, and a CPU server takes over",
+            listOf("FAKE-SERVER gpu=true", "FAKE-SERVER gpu=false"),
+            startSequence(),
+        )
+    }
+
+    @Test
+    fun `a failure that survives the cpu restart is reported and does not loop`() {
+        val failure = try {
+            transcribe(fakeServer(gpuOk = false, cpuOk = false), useGpu = true)
+            error("expected the GPU+CPU failures to throw")
+        } catch (t: WhisperCliEngine.TranscriptionException) {
+            t
+        }
+        assertTrue("the error must carry the server's HTTP failure: ${failure.message}", failure.message!!.contains("HTTP 500"))
+        assertEquals(
+            "exactly one CPU restart, no retry loop",
+            listOf("FAKE-SERVER gpu=true", "FAKE-SERVER gpu=false"),
+            startSequence(),
+        )
+    }
+
+    @Test
+    fun `an explicit cpu run does not restart`() {
+        val text = transcribe(fakeServer(gpuOk = false, cpuOk = true), useGpu = false)
+        assertEquals("the cpu server's answer must be returned", "cpu says hi", text)
+        assertEquals("a CPU run starts exactly one CPU server", listOf("FAKE-SERVER gpu=false"), startSequence())
+    }
+}

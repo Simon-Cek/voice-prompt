@@ -31,6 +31,10 @@ import java.util.concurrent.TimeUnit
  * fails to start), [transcribe] falls back to the one-shot [WhisperCliEngine] path, so dictation
  * keeps working exactly as before.
  *
+ * Review P3: a request that fails on the GPU-backed server is retried once on a CPU-restarted
+ * server (`--no-gpu`) before the CLI fallback — the same GPU→CPU safety net as
+ * [WhisperCliEngine.transcribe].
+ *
  * Protocol (whisper.cpp v1.9.5 server, verified against the bundled build): multipart/form-data
  * `POST /inference` with a `file` part (the WAV) plus text fields (`response_format=text`,
  * `no_timestamps=true`, `suppress_nst=true`, `language`); the body is the transcript. `GET
@@ -137,6 +141,32 @@ object WhisperServerEngine {
                     throw e
                 } catch (t: Throwable) {
                     stopCurrent()
+                    // Review P3: the GPU-backed server failed on this machine (weak iGPU, flaky
+                    // driver). Restart it on CPU and retry this utterance once before giving up
+                    // on the server — the CLI fallback would re-load the model and lose the warm
+                    // process. Timeouts and cancellations are handled above and do not retry.
+                    if (useGpu) {
+                        log.warn("whisper-server request failed on the GPU (${t.message}); retrying once with --no-gpu")
+                        val cpuActive = synchronized(LOCK) {
+                            ensureRunning(ServerKey(model, false, threads), serverBinary, logFile)
+                        }
+                        if (cpuActive != null) {
+                            try {
+                                val raw = request(cpuActive, wavFile, language, timeoutMs, indicator)
+                                lastUsed = System.currentTimeMillis()
+                                return WhisperCliEngine().normalizeTranscript(raw)
+                            } catch (e: ProcessCanceledException) {
+                                stopCurrent()
+                                throw e
+                            } catch (e: InferenceTimeoutException) {
+                                stopCurrent()
+                                throw e
+                            } catch (cpuFailure: Throwable) {
+                                stopCurrent()
+                                log.warn("whisper-server request also failed on CPU (${cpuFailure.message}); giving up on the server")
+                            }
+                        }
+                    }
                     if (!allowFallback) {
                         log.warn("whisper-server request failed; rethrowing (fallback disabled)", t)
                         throw t
