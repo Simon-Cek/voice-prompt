@@ -45,6 +45,32 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
 /**
+ * Review N1: whether a key release in [mode] should end the session.
+ *
+ * A session is *live* while it is already recording **or** while a start is still in progress
+ * (the beep window, before the capture line is open). Before N1 the check was `isRecording`
+ * only, so a release during that start window was ignored and an accidental tap began a full
+ * 60 s recording. [keyCode] must be one of the shortcut's keys ([comboKeys]).
+ */
+internal fun shouldStopOnRelease(
+    mode: RecordingMode,
+    isRecording: Boolean,
+    isStarting: Boolean,
+    keyCode: Int,
+    comboKeys: Set<Int>,
+): Boolean = mode == RecordingMode.HOLD && (isRecording || isStarting) && keyCode in comboKeys
+
+/**
+ * Review N1: whether a window deactivation in [mode] should end the session (the safety net for
+ * a lost key-up). A session is live while recording or while a start is still in progress.
+ */
+internal fun shouldStopOnDeactivate(
+    mode: RecordingMode,
+    isRecording: Boolean,
+    isStarting: Boolean,
+): Boolean = mode == RecordingMode.HOLD && (isRecording || isStarting)
+
+/**
  * The owner of the live dictation session: the global key watcher (an AWT event listener), the
  * audio capture line and the in-flight transcription.
  *
@@ -131,29 +157,36 @@ class DictationSession : Disposable {
         keyWatcher = listener
     }
 
-    private fun onKeyReleased(e: KeyEvent) {
+    internal fun onKeyReleased(e: KeyEvent) {
         val stroke = currentShortcut()?.firstKeyStroke ?: return
         if (e.keyCode == stroke.keyCode) triggerGuard.mainKeyReleased()
         // Hold mode: the recording ends as soon as *any* key of the shortcut is released.
         // A release is a single event, so — unlike the old press counter — auto-repeat
-        // cannot wedge it "still held".
-        if (CopilotVoiceSettings.instance.mode == RecordingMode.HOLD && isRecording &&
-            e.keyCode in shortcutKeyCodes(stroke.keyCode, stroke.modifiers)
+        // cannot wedge it "still held". Review N1: "live" also covers a start that is still
+        // in progress (isStarting), not only an already-running recording.
+        if (shouldStopOnRelease(
+                CopilotVoiceSettings.instance.mode,
+                isRecording,
+                starting.get(),
+                e.keyCode,
+                shortcutKeyCodes(stroke.keyCode, stroke.modifiers),
+            )
         ) {
             stop()
         }
     }
 
-    private fun onWindowDeactivated() {
+    internal fun onWindowDeactivated() {
         // Safety net for a lost key-up (e.g. the Alt key activating a menu before its
         // release is seen): in Hold mode we would otherwise wait forever for a release
-        // that never comes and stay stuck in the "listening" state.
-        if (CopilotVoiceSettings.instance.mode == RecordingMode.HOLD && isRecording) stop()
+        // that never comes and stay stuck in the "listening" state. Review N1: also covers
+        // a start that is still in progress.
+        if (shouldStopOnDeactivate(CopilotVoiceSettings.instance.mode, isRecording, starting.get())) stop()
     }
 
     private fun activeProject(): Project? = ProjectManager.getInstance().openProjects.firstOrNull()
 
-    private fun currentShortcut(): KeyboardShortcut? =
+    internal fun currentShortcut(): KeyboardShortcut? =
         ActionManager.getInstance().getAction(ACTION_ID)?.shortcutSet?.shortcuts
             ?.filterIsInstance<KeyboardShortcut>()?.firstOrNull()
 
@@ -347,6 +380,16 @@ class DictationSession : Disposable {
      * Null (the default) = the production pooled-thread path.
      */
     internal var stopWorkDispatcher: ((() -> Unit) -> Unit)? = null
+
+    /**
+     * Test seam (review N1): set the "start in progress" flag without running [start], so the
+     * release/deactivate handlers can be driven deterministically — no audio, no beeps, and no
+     * dependence on the beep window length. [stopWorkDispatcher] still captures the `stop()` the
+     * handler fires, so the blocking tail never runs.
+     */
+    internal fun setStartingForTest(value: Boolean) {
+        starting.set(value)
+    }
 
     private fun transcribeInBackground(project: Project?, wavFile: File) {
         val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
