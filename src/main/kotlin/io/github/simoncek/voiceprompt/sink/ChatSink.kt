@@ -1,5 +1,6 @@
 package io.github.simoncek.voiceprompt.sink
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 
 /**
@@ -20,10 +21,19 @@ class InputNotFoundException(message: String = "Could not locate the Copilot cha
  */
 class ChatSinkChain(private val sinks: List<ChatSink>) {
 
+    private val log = Logger.getInstance(ChatSinkChain::class.java)
+
     fun insert(project: Project?, text: String, autoSend: Boolean): Result<Unit> {
         for (sink in sinks) {
             if (!sink.isAvailable(project)) continue
-            val result = sink.insert(project, text, autoSend)
+            // A sink may throw (e.g. from setText or an editor write) as well as return a
+            // failure; both must fall through to the next sink, not abort the chain.
+            val result = try {
+                sink.insert(project, text, autoSend)
+            } catch (t: Throwable) {
+                log.warn("sink ${sink.javaClass.simpleName} threw; trying next", t)
+                Result.failure(t)
+            }
             if (result.isSuccess) return result
         }
         return Result.failure(InputNotFoundException())

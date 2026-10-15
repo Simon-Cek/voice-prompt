@@ -27,6 +27,18 @@ class ChatSinkChainTest {
         }
     }
 
+    /** A stub sink that throws on every insert, like a real sink failing inside setText. */
+    private class ThrowingSink(private val message: String) : ChatSink {
+        var calls = 0
+
+        override fun isAvailable(project: Project?): Boolean = true
+
+        override fun insert(project: Project?, text: String, autoSend: Boolean): Result<Unit> {
+            calls++
+            throw RuntimeException(message)
+        }
+    }
+
     @Test
     fun `tries sinks in order and stops at the first success`() {
         val first = StubSink()
@@ -66,6 +78,35 @@ class ChatSinkChainTest {
         assertEquals(1, first.calls)
         assertEquals(1, second.calls)
         assertEquals("hi", second.lastText)
+    }
+
+    @Test
+    fun `falls back to the next sink when one throws`() {
+        val first = ThrowingSink("setText blew up")
+        val second = StubSink()
+        val chain = ChatSinkChain(listOf(first, second))
+
+        val result = chain.insert(null, "hi", autoSend = false)
+
+        assertTrue("a throwing sink must not abort the chain", result.isSuccess)
+        assertEquals(1, first.calls)
+        assertEquals(1, second.calls)
+        assertEquals("hi", second.lastText)
+    }
+
+    @Test
+    fun `returns a failure when every sink throws`() {
+        val chain = ChatSinkChain(
+            listOf(
+                ThrowingSink("a"),
+                ThrowingSink("b"),
+            ),
+        )
+
+        val result = chain.insert(null, "hi", autoSend = false)
+
+        assertFalse(result.isSuccess)
+        assertTrue(result.exceptionOrNull() is InputNotFoundException)
     }
 
     @Test
