@@ -244,6 +244,18 @@ class DictationSession : Disposable {
         status.setPhase(DictationPhase.IDLE)
     }
 
+    /**
+     * Ends the recording and hands the clip to transcription.
+     *
+     * Review P4: the stop tail is blocking — `capture.stop()` joins the reader thread (up to
+     * 2 s), the WAV write is disk I/O, and the model resolve reads the disk — yet this runs
+     * on the EDT for a key-triggered stop (TAP, status-bar click) and on the AWT event thread
+     * for Hold-mode releases. Only the cheap state transitions happen on the calling thread;
+     * the rest is queued to a pooled thread, exactly like the start sequence (issue #10).
+     * Callers see no behaviour change: the stop tone still plays after the capture line is
+     * closed (issue #10), and the phase transitions still land on the EDT (`DictationStatus`
+     * and [notify] marshal themselves).
+     */
     fun stop(project: Project? = null) {
         // Prefer the project the recording started in: the stop triggers (key release, max
         // duration) carry no event project of their own, and the first-opened project would
@@ -260,6 +272,19 @@ class DictationSession : Disposable {
         // is instant. When this stop is cancelling an in-flight start, keep it off — a line the
         // user just aborted should not be held open.
         val keepSeconds = if (cancelling) 0L else CopilotVoiceSettings.instance.keepMicReadySeconds.toLong()
+        // Test seam first (review P4's regression test captures it), else the production path.
+        // Fresh lambda literals at both sites: the platform's executeOnPooledThread takes a
+        // Runnable (SAM conversion needs a literal, not a typed function value).
+        stopWorkDispatcher?.invoke { finishStop(target, keepSeconds) }
+            ?: ApplicationManager.getApplication().executeOnPooledThread { finishStop(target, keepSeconds) }
+    }
+
+    /**
+     * The blocking stop tail (review P4): closing the capture (a join of up to 2 s), the stop
+     * tone, the pre-inference gates, the WAV write and the transcription hand-off. Runs on a
+     * pooled thread via [stop]; [stopWorkDispatcher] routes it elsewhere in tests.
+     */
+    private fun finishStop(target: Project?, keepSeconds: Long) {
         val samples = capture.stop(keepSeconds)
         // Stop tone only AFTER the capture line is closed (issue #10): before, it could bleed
         // into the tail of the captured clip.
@@ -296,14 +321,23 @@ class DictationSession : Disposable {
         }
     }
 
+    /**
+     * Test seam for [stop] (review P4): routes the queued stop work to a custom dispatcher so
+     * a test can prove the blocking tail is *queued* rather than run on the calling thread.
+     * Null (the default) = the production pooled-thread path.
+     */
+    internal var stopWorkDispatcher: ((() -> Unit) -> Unit)? = null
+
     private fun transcribeInBackground(project: Project?, wavFile: File) {
         val requestedModelId = CopilotVoiceSettings.instance.modelName
-        val resolved = ModelManager.resolveActive(null, requestedModelId)
         val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
             override fun run(indicator: ProgressIndicator) {
                 try {
-                    // Resolve the model here, off the EDT: restoring the bundled model copies and
-                    // checksums a ~75 MB file.
+                    // Review P4: resolve the model here, off the EDT — it is disk I/O, and on
+                    // first use restoring the bundled model copies and checksums a ~75 MB file.
+                    // (This used to run on the calling thread, in `stop()`'s path, despite the
+                    // comment claiming otherwise.)
+                    val resolved = ModelManager.resolveActive(null, requestedModelId)
                     var model = resolved
                     var activeModelId = requestedModelId
                     if (model == null) {
