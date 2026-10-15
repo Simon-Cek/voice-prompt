@@ -37,6 +37,8 @@ import java.awt.event.AWTEventListener
 import java.awt.event.KeyEvent
 import java.awt.event.WindowEvent
 import java.io.File
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The owner of the live dictation session: the global key watcher (an AWT event listener), the
@@ -68,6 +70,16 @@ class DictationSession : Disposable {
     @Volatile private var recordingProject: Project? = null
     /** Ignores auto-repeat re-fires of the shortcut while the key is still held. */
     private val triggerGuard = ShortcutTriggerGuard()
+    /**
+     * Guards the asynchronous start sequence (issue #10): set for the whole
+     * [startInternal] run and released on every exit path, so a second press while the first
+     * is still opening is ignored instead of double-opening the mic.
+     */
+    private val starting = AtomicBoolean(false)
+    /** Set by [stop] while a start is still in progress, so the start aborts before opening the mic. */
+    @Volatile private var startCancelled = false
+    /** Bounded wait for the start tone before the mic opens (review #10 suggests 400 ms). */
+    private val START_BEEP_WAIT_MS = 400L
 
     /** Whether the global AWT key watcher is installed (tests and diagnostics). */
     val isKeyWatcherInstalled: Boolean get() = keyWatcher != null
@@ -133,8 +145,40 @@ class DictationSession : Disposable {
     }
 
     fun start(project: Project?) {
-        // "Opening mic…" in the status bar while the capture line is opened.
+        // "Opening mic…" in the status bar while the start sequence runs.
         status.setPhase(DictationPhase.OPENING)
+        // Issue #10: the whole start sequence (start tone + awaiting it + opening the mic) runs
+        // on a pooled thread: the tone must finish *before* the mic opens (afterwards it bleeds
+        // into the capture, and the headset profile switch triggered by the mic-open swallows a
+        // late tone), and both steps block — so this must not run on the EDT. A second press
+        // while the first is still opening is ignored; a release in between cancels via [stop].
+        if (!starting.compareAndSet(false, true)) return
+        startCancelled = false
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                startInternal(project)
+            } finally {
+                starting.set(false)
+            }
+        }
+    }
+
+    private fun startInternal(project: Project?) {
+        // Start tone first, before the mic opens (issue #10). Awaited with a bound so a slow or
+        // wedged audio device cannot stall dictation — the tone is best-effort feedback.
+        if (CopilotVoiceSettings.instance.soundEnabled) {
+            try {
+                Beeps.recordingStart().get(START_BEEP_WAIT_MS, TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {
+                // Timeout or (unexpectedly) failure: proceed; the tone is not worth a lost dictation.
+            }
+        }
+        if (startCancelled) {
+            // A stop() ran while we were opening (a quick tap): the session is already torn down.
+            log.info("start cancelled while in progress")
+            status.setPhase(DictationPhase.IDLE)
+            return
+        }
         val device = CopilotVoiceSettings.instance.inputDevice
         val fellBack = try {
             capture.start(device)
@@ -160,7 +204,6 @@ class DictationSession : Disposable {
         }
         recordingProject = project
         status.setPhase(DictationPhase.RECORDING)
-        if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStart()
     }
 
     fun stop(project: Project? = null) {
@@ -169,8 +212,15 @@ class DictationSession : Disposable {
         // be the wrong target in a multi-project window.
         val target = recordingProject ?: project
         recordingProject = null
-        if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
+        if (starting.get()) {
+            // A start sequence is still opening the mic (issue #10): cancel it, so it does not
+            // start a recording this stop is already tearing down.
+            startCancelled = true
+        }
         val samples = capture.stop()
+        // Stop tone only AFTER the capture line is closed (issue #10): before, it could bleed
+        // into the tail of the captured clip.
+        if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
         if (samples.isEmpty()) {
             status.setPhase(DictationPhase.IDLE)
             return
