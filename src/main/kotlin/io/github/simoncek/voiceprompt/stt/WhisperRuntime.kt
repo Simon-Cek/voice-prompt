@@ -18,52 +18,97 @@ object WhisperRuntime {
     class UnsupportedPlatformException(message: String) : IOException(message)
     class RuntimeExtractionException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
+    /**
+     * Serializes the extract-or-validate decision: two concurrent transcriptions must not both
+     * extract the same runtime at once (review P1).
+     */
+    private val LOCK = Any()
+
+    /**
+     * The resolved runtime for this session. [WhisperRuntime] is a per-classloader singleton, so
+     * this lives exactly as long as the plugin does — "validate once per session" (review P1).
+     */
+    @Volatile
+    private var cached: ResolvedRuntime? = null
+
+    /** Marker written into the runtime dir after a full checksum pass; makes it survive IDE restarts. */
+    private const val VALIDATION_MARKER = ".validated"
+
+    /** The resolved CLI plus everything needed to verify it cheaply on later calls. */
+    internal class ResolvedRuntime(val cli: Path, val target: Path, val names: Set<String>)
+
     fun cliPath(): Path {
-        val version = readVersion()
-        val platformDir = when {
-            SystemInfo.isWindows -> "win-x64"
-            SystemInfo.isLinux -> "linux-x64"
-            else -> throw UnsupportedPlatformException(
-                "Unsupported platform: ${SystemInfo.OS_NAME} (${SystemInfo.OS_ARCH}). " +
-                    "Voice Prompt currently bundles whisper-cli for Windows x64 and Linux x64."
-            )
+        // Fast path: already resolved this session and every file is still present (a handful of
+        // stats — no hashing). This is the review P1 fix: the SHA-256 pass over the bundled
+        // libraries runs once per install, not on every dictation.
+        cached?.let { resolved ->
+            if (isStillValid(resolved)) return resolved.cli
         }
-        return extractIfNeeded(version, platformDir)
+        val version = readVersion()
+        val platformDir = platformDirName()
+        val resolved = ensureRuntime(runtimeTarget(version, platformDir), version, platformDir)
+        cached = resolved
+        return resolved.cli
     }
+
+    private fun isStillValid(resolved: ResolvedRuntime): Boolean =
+        resolved.names.all { Files.isRegularFile(resolved.target.resolve(it)) }
+
+    private fun platformDirName(): String = when {
+        SystemInfo.isWindows -> "win-x64"
+        SystemInfo.isLinux -> "linux-x64"
+        else -> throw UnsupportedPlatformException(
+            "Unsupported platform: ${SystemInfo.OS_NAME} (${SystemInfo.OS_ARCH}). " +
+                "Voice Prompt currently bundles whisper-cli for Windows x64 and Linux x64."
+        )
+    }
+
+    private fun runtimeTarget(version: String, platformDir: String): Path =
+        Paths.get(PathManager.getSystemPath(), "copilot-voice", "runtime", version, platformDir)
+
+    /**
+     * Ensures [target] holds the extracted, checksum-verified runtime for [version] and returns
+     * the resolved CLI. The full SHA-256 pass runs only when the version marker is missing
+     * (fresh install, wiped dir, or a bumped whisper version) or a file has disappeared;
+     * otherwise a cheap existence check suffices (review P1: don't re-hash the bundled libraries
+     * on every dictation). Thread-safe: concurrent callers are serialized by [LOCK], so the
+     * runtime is never extracted twice at once (review P1).
+     */
+    internal fun ensureRuntime(target: Path, version: String, platformDir: String): ResolvedRuntime =
+        synchronized(LOCK) {
+            val sums = readSums(platformDir)
+            if (sums.isEmpty()) throw RuntimeExtractionException("No bundled whisper files found for $platformDir")
+            val marker = target.resolve(VALIDATION_MARKER)
+            if (!markerIsValid(marker, version) || !allPresent(target, sums)) {
+                if (!allPresentAndValid(target, sums)) {
+                    extract(target, sums, platformDir)
+                }
+                writeMarker(marker, version)
+            }
+            val cli = target.resolve(if (SystemInfo.isWindows) "whisper-cli.exe" else "whisper-cli")
+            if (!Files.isRegularFile(cli)) throw RuntimeExtractionException("whisper-cli is missing after extraction: $cli")
+            ResolvedRuntime(cli, target, sums.keys.toSet())
+        }
+
+    /** True when a previous run already checksummed every file for this exact [version]. */
+    private fun markerIsValid(marker: Path, version: String): Boolean =
+        runCatching { Files.isRegularFile(marker) && Files.readString(marker).trim() == version }.getOrDefault(false)
+
+    private fun writeMarker(marker: Path, version: String) {
+        runCatching {
+            Files.createDirectories(marker.parent)
+            Files.writeString(marker, version)
+        }.onFailure { LOG.warn("could not write the runtime validation marker: $marker", it) }
+    }
+
+    /** Cheap existence check (no checksums): catches a partially deleted runtime dir. */
+    private fun allPresent(target: Path, sums: Map<String, String>): Boolean =
+        sums.keys.all { Files.isRegularFile(target.resolve(it)) }
 
     private fun readVersion(): String =
         javaClass.classLoader.getResource("whisper/WHISPER_VERSION.txt")?.let { url ->
             url.openStream().use { it.readBytes() }.decodeToString().trim()
         } ?: throw RuntimeExtractionException("Bundled whisper version file is missing")
-
-    private fun extractIfNeeded(version: String, platformDir: String): Path {
-        val target = Paths.get(PathManager.getSystemPath(), "copilot-voice", "runtime", version, platformDir)
-        val sums = readSums(platformDir)
-        if (sums.isEmpty()) throw RuntimeExtractionException("No bundled whisper files found for $platformDir")
-        if (!allPresentAndValid(target, sums)) {
-            Files.createDirectories(target)
-            for ((name, expected) in sums) {
-                val resource = javaClass.classLoader.getResourceAsStream("whisper/$platformDir/$name")
-                    ?: throw RuntimeExtractionException("Bundled resource is missing: $platformDir/$name")
-                val destination = target.resolve(name)
-                Files.createDirectories(destination.parent)
-                val temp = Files.createTempFile(target, "extract", ".part")
-                try {
-                    resource.use { input -> Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING) }
-                    if (sha256(temp) != expected) {
-                        throw RuntimeExtractionException("Checksum mismatch for $platformDir/$name")
-                    }
-                    Files.move(temp, destination, StandardCopyOption.REPLACE_EXISTING)
-                } finally {
-                    Files.deleteIfExists(temp)
-                }
-            }
-            if (SystemInfo.isLinux || SystemInfo.isMac) fixUnixPermissions(target)
-        }
-        val cli = target.resolve(if (SystemInfo.isWindows) "whisper-cli.exe" else "whisper-cli")
-        if (!Files.exists(cli)) throw RuntimeExtractionException("whisper-cli is missing after extraction: $cli")
-        return cli
-    }
 
     private fun readSums(platformDir: String): Map<String, String> {
         val sums = LinkedHashMap<String, String>()
@@ -86,6 +131,28 @@ object WhisperRuntime {
             if (sha256(file) != expected) return false
         }
         return true
+    }
+
+    /** Extracts every bundled file into [target], verifying each one's checksum as it goes. */
+    private fun extract(target: Path, sums: Map<String, String>, platformDir: String) {
+        Files.createDirectories(target)
+        for ((name, expected) in sums) {
+            val resource = javaClass.classLoader.getResourceAsStream("whisper/$platformDir/$name")
+                ?: throw RuntimeExtractionException("Bundled resource is missing: $platformDir/$name")
+            val destination = target.resolve(name)
+            Files.createDirectories(destination.parent)
+            val temp = Files.createTempFile(target, "extract", ".part")
+            try {
+                resource.use { input -> Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING) }
+                if (sha256(temp) != expected) {
+                    throw RuntimeExtractionException("Checksum mismatch for $platformDir/$name")
+                }
+                Files.move(temp, destination, StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                Files.deleteIfExists(temp)
+            }
+        }
+        if (SystemInfo.isLinux || SystemInfo.isMac) fixUnixPermissions(target)
     }
 
     private fun fixUnixPermissions(target: Path) {

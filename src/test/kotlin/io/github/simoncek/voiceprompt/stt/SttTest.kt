@@ -1,13 +1,20 @@
 package io.github.simoncek.voiceprompt.stt
 
+import com.intellij.openapi.util.SystemInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
+import java.util.Collections
+import java.util.concurrent.Executors
 
 class WhisperRuntimeTest {
 
@@ -136,6 +143,136 @@ class WhisperRuntimeThreadsTest {
         val def = WhisperRuntime.defaultThreads()
         assertTrue("default >= 1", def >= 1)
         assertTrue("default <= logical ($def <= $logical)", def <= logical)
+    }
+}
+
+/**
+ * Review P1: [WhisperRuntime.cliPath] used to SHA-256 every bundled library (~50–100 MB on
+ * Linux) on every dictation. The runtime must now be validated once (a version-keyed marker in
+ * the runtime dir), cached for the session, and extraction must be guarded by a lock so two
+ * concurrent transcriptions can't race. These tests drive the real [WhisperRuntime.ensureRuntime]
+ * against the real bundled resources into a temp dir; whichever test resolves first pays the
+ * one-time extraction, the rest exercise the cheap marker fast path.
+ */
+class WhisperRuntimeResolveTest {
+
+    companion object {
+        private val platformDir: String = when {
+            SystemInfo.isWindows -> "win-x64"
+            SystemInfo.isLinux -> "linux-x64"
+            else -> "unsupported"
+        }
+
+        private val version: String =
+            javaClass.classLoader.getResource("whisper/WHISPER_VERSION.txt")
+                ?.readText()?.trim()
+                ?: error("whisper/WHISPER_VERSION.txt is missing from the test classpath")
+
+        /** Shared by most tests: extracted once per test class, then mutated per scenario. */
+        private val sharedTarget: Path by lazy {
+            val dir = Files.createTempDirectory("whisper-runtime-test")
+            dir.toFile().deleteOnExit()
+            dir
+        }
+    }
+
+    private fun resolved(): Path =
+        WhisperRuntime.ensureRuntime(sharedTarget, version, platformDir).cli
+
+    /** The first bundled file other than the CLI, with its manifest checksum. */
+    private fun sacrificialFile(): Pair<Path, String> {
+        val entries = javaClass.classLoader.getResourceAsStream("whisper/SHA256SUMS")!!
+            .bufferedReader().use { reader ->
+                reader.lineSequence()
+                    .map { it.trim().split(Regex("\\s+"), limit = 2) }
+                    .filter { it.size == 2 && it[1].startsWith("$platformDir/") }
+                    .map { it[1].removePrefix("$platformDir/") to it[0].lowercase() }
+                    .toList()
+            }
+        val (name, sha) = entries.first {
+            !it.first.equals("whisper-cli", ignoreCase = true) && !it.first.endsWith(".exe")
+        }
+        return sharedTarget.resolve(name) to sha
+    }
+
+    @Test
+    fun `resolves the runtime and writes the version marker`() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        val cli = resolved()
+        assertTrue("whisper-cli must exist after resolution", Files.isRegularFile(cli))
+        if (!SystemInfo.isWindows) {
+            val perms = Files.getPosixFilePermissions(cli)
+            assertTrue("whisper-cli must be executable", perms.contains(PosixFilePermission.OWNER_EXECUTE))
+        }
+        val marker = sharedTarget.resolve(".validated")
+        assertTrue("the version marker must exist after resolution", Files.isRegularFile(marker))
+        assertEquals("the marker must carry the whisper version", version, Files.readString(marker).trim())
+    }
+
+    @Test
+    fun `does not re-hash when the marker and all files are present`() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        resolved() // extract (or reuse) the shared runtime
+        val (file, expected) = sacrificialFile()
+        // Corrupt the file in place: name and presence survive, only the checksum is wrong.
+        Files.write(file, byteArrayOf(1, 2), StandardOpenOption.APPEND)
+        assertTrue("precondition: the file is now corrupt", WhisperRuntime.sha256(file) != expected)
+        resolved()
+        // The marker fast path must NOT detect the corruption — that would mean it re-hashed.
+        assertTrue(
+            "a corrupt-but-present file must not be re-downloaded (no re-hash on the fast path)",
+            WhisperRuntime.sha256(file) != expected,
+        )
+    }
+
+    @Test
+    fun `restores a deleted file on the next resolution`() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        resolved()
+        val (file, expected) = sacrificialFile()
+        Files.deleteIfExists(file)
+        resolved()
+        assertTrue("a deleted file must be restored", Files.isRegularFile(file))
+        assertEquals("the restored file must match the manifest", expected, WhisperRuntime.sha256(file))
+    }
+
+    @Test
+    fun `a stale marker forces a full revalidation`() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        resolved()
+        val marker = sharedTarget.resolve(".validated")
+        Files.writeString(marker, "bogus-version")
+        resolved()
+        assertEquals("a stale marker must be rewritten with the real version", version, Files.readString(marker).trim())
+    }
+
+    @Test
+    fun `concurrent resolutions are serialized and agree`() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        val dir = Files.createTempDirectory("whisper-runtime-concurrency")
+        dir.toFile().deleteOnExit()
+        val results = Collections.synchronizedList(mutableListOf<Path>())
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val executor = Executors.newFixedThreadPool(8)
+        try {
+            val futures = (1..8).map {
+                executor.submit {
+                    results.add(WhisperRuntime.ensureRuntime(dir, version, platformDir).cli)
+                }
+            }
+            futures.forEach { future ->
+                try {
+                    future.get()
+                } catch (t: Throwable) {
+                    errors.add(t)
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+        assertTrue("no thread may fail: $errors", errors.isEmpty())
+        assertEquals("every thread must resolve the same CLI", 1, results.toSet().size)
+        assertTrue("the marker must be valid afterwards", Files.isRegularFile(dir.resolve(".validated")))
     }
 }
 
