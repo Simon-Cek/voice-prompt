@@ -200,6 +200,17 @@ object WhisperRuntime {
 
     fun runtimeDir(cli: Path): String = cli.parent.toString()
 
+    /**
+     * The bundled whisper-server (review P2) for this platform, or null when the platform bundle
+     * ships no server binary (Windows for now — no cross-built .exe in the bundle). The binary is
+     * part of the checksum-verified runtime, so resolving it also guarantees the libraries it
+     * links are extracted next to it.
+     */
+    fun serverPath(): Path? {
+        val name = if (SystemInfo.isWindows) "whisper-server.exe" else "whisper-server"
+        return cliPath().parent.resolve(name).takeIf { Files.isRegularFile(it) }
+    }
+
     /** Whether the bundled whisper build for the current platform ships a Vulkan (GPU) backend. */
     fun gpuBackendAvailable(): Boolean {
         val platformDir = when {

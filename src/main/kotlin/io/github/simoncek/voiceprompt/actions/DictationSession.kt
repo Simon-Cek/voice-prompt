@@ -31,6 +31,7 @@ import io.github.simoncek.voiceprompt.stt.ModelManager
 import io.github.simoncek.voiceprompt.stt.WhisperCliEngine
 import io.github.simoncek.voiceprompt.stt.WhisperLanguage
 import io.github.simoncek.voiceprompt.stt.WhisperRuntime
+import io.github.simoncek.voiceprompt.stt.WhisperServerEngine
 import java.awt.AWTEvent
 import java.awt.Toolkit
 import java.awt.event.AWTEventListener
@@ -342,7 +343,7 @@ class DictationSession : Disposable {
                     try {
                         log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
                         val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
-                        val text = WhisperCliEngine().transcribe(
+                        val text = WhisperServerEngine.transcribe(
                             wavFile, model,
                             language = language, useGpu = useGpu(), threads = threads(),
                             indicator = indicator,
@@ -470,6 +471,9 @@ class DictationSession : Disposable {
         runCatching { capture.release() }
             .onFailure { log.warn("failed to release the audio capture resources on dispose", it) }
         WhisperCliEngine.killActiveProcesses()
+        // The long-lived whisper-server (review P2) outlives any single utterance, so it gets an
+        // explicit stop here as well — otherwise it would outlive the plugin (review #6).
+        WhisperServerEngine.shutdown()
     }
 
     companion object {

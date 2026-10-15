@@ -1,20 +1,27 @@
 package io.github.simoncek.voiceprompt.stt
 
 import com.intellij.openapi.util.SystemInfo
+import io.github.simoncek.voiceprompt.audio.AudioCapture
+import io.github.simoncek.voiceprompt.audio.WavFile
+import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Test
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.Executors
+import javax.sound.sampled.AudioFormat
 
 class WhisperRuntimeTest {
 
@@ -367,5 +374,212 @@ class ModelManagerTest {
             abc123  ggml-base.en.bin
         """.trimIndent()
         assertEquals("abc123", ModelManager.parseSha256Sums(sums, "ggml-base.en.bin"))
+    }
+}
+
+/**
+ * Review P2: the long-lived `whisper-server` engine. The launch arguments and the multipart
+ * body are pure and tested directly; the live end-to-end path (real bundled server binary + real
+ * bundled model + the engine's HTTP request) is a separate, platform-gated test class.
+ */
+class WhisperServerArgsTest {
+
+    private val server = Paths.get("/runtime", "whisper-server")
+    private val model = Paths.get("/models", "ggml-tiny.en.bin")
+
+    @Test
+    fun `cpu mode adds --no-gpu and the thread count`() {
+        val args = WhisperServerEngine.buildServerArgs(server, model, useGpu = false, threads = 8, port = 1234)
+        assertEquals(
+            listOf(
+                server.toString(), "-m", model.toString(),
+                "--host", "127.0.0.1", "--port", "1234",
+                "-t", "8", "--no-gpu",
+            ),
+            args,
+        )
+    }
+
+    @Test
+    fun `gpu mode omits --no-gpu and -t for the default thread count`() {
+        val args = WhisperServerEngine.buildServerArgs(server, model, useGpu = true, threads = 0, port = 1234)
+        assertEquals(
+            listOf(server.toString(), "-m", model.toString(), "--host", "127.0.0.1", "--port", "1234"),
+            args,
+        )
+        assertFalse("--no-gpu must be absent for GPU mode", args.contains("--no-gpu"))
+        assertFalse("-t must be absent for the default thread count", args.contains("-t"))
+    }
+}
+
+class WhisperServerMultipartTest {
+
+    @Test
+    fun `body carries the wav bytes, every field, and a well-formed boundary`() {
+        val wav = File.createTempFile("vp-server-test", ".wav")
+        wav.deleteOnExit()
+        val payload = byteArrayOf(1, 2, 3, 4, 5)
+        wav.writeBytes(payload)
+
+        val body = WhisperServerEngine.buildMultipart(wav, "en")
+        val text = String(body.bytes, Charsets.UTF_8)
+        val boundary = body.contentType.substringAfter("boundary=")
+
+        assertTrue("multipart content type", body.contentType.startsWith("multipart/form-data; boundary="))
+        assertTrue("body starts with the boundary", text.startsWith("--$boundary\r\n"))
+        assertTrue("body ends with the closing boundary", text.endsWith("--$boundary--\r\n"))
+        assertTrue("response_format field", text.contains("name=\"response_format\""))
+        assertTrue("no_timestamps field", text.contains("name=\"no_timestamps\""))
+        assertTrue("suppress_nst field", text.contains("name=\"suppress_nst\""))
+        assertTrue("language field", text.contains("name=\"language\""))
+        assertTrue("response_format is text (plain-text reply, no JSON to parse)", text.contains("\r\n\r\ntext\r\n"))
+        assertTrue("language value", text.contains("\r\n\r\nen\r\n"))
+        // The audio bytes themselves must survive the framing.
+        assertTrue("the wav bytes are in the body", containsBytes(body.bytes, payload))
+    }
+
+    /**
+     * Regression for the framing bug that broke every dictation on the live server: the file part
+     * must present BOTH of its headers before the blank line that closes the header block. A blank
+     * line after the `Content-Disposition` line turns the `Content-Type` line into body data, the
+     * WAV magic is no longer at offset 0, and whisper-server answers 400 "failed to decode audio
+     * data" (verified against the bundled v1.9.5 binary: correct framing -> 200, this shape -> 400).
+     */
+    @Test
+    fun `file part headers are contiguous with a single blank line before the audio`() {
+        val wav = File.createTempFile("vp-server-test", ".wav")
+        wav.deleteOnExit()
+        val audio = "RIFFfakewav".encodeToByteArray()
+        wav.writeBytes(audio)
+
+        val body = WhisperServerEngine.buildMultipart(wav, "en")
+        val text = String(body.bytes, Charsets.UTF_8)
+
+        val fileHeaders = "Content-Disposition: form-data; name=\"file\"; filename=\"${wav.name}\"\r\n" +
+            "Content-Type: application/octet-stream\r\n\r\n"
+        assertTrue(
+            "the file part's two headers must be contiguous, closed by one blank line",
+            text.contains(fileHeaders),
+        )
+        assertFalse(
+            "no blank line may separate the file part's headers (that makes Content-Type body data)",
+            text.contains("filename=\"${wav.name}\"\r\n\r\nContent-Type"),
+        )
+        // And the audio must immediately follow the closing blank line of the file part.
+        assertTrue(
+            "the audio bytes follow the file part's header block directly",
+            text.contains(fileHeaders) && text.substringAfter(fileHeaders).startsWith(String(audio)),
+        )
+    }
+
+    private fun containsBytes(haystack: ByteArray, needle: ByteArray): Boolean {
+        outer@ for (i in 0..haystack.size - needle.size) {
+            for (j in needle.indices) {
+                if (haystack[i + j] != needle[j]) continue@outer
+            }
+            return true
+        }
+        return false
+    }
+}
+
+/**
+ * Review P2, end-to-end: the real bundled `whisper-server` binary, the real bundled model, and
+ * the engine's actual HTTP path transcribing a silent clip. Skipped on platforms whose bundle
+ * has no server binary (Windows for now) or without the bundled model on the classpath.
+ */
+class WhisperServerIntegrationTest {
+
+    companion object {
+        private val platformDir: String = when {
+            SystemInfo.isWindows -> "win-x64"
+            SystemInfo.isLinux -> "linux-x64"
+            else -> "unsupported"
+        }
+
+        private val version: String =
+            javaClass.classLoader.getResource("whisper/WHISPER_VERSION.txt")
+                ?.readText()?.trim()
+                ?: error("whisper/WHISPER_VERSION.txt is missing from the test classpath")
+    }
+
+    private var workDir: Path? = null
+    private var serverBinary: Path? = null
+    private var model: Path? = null
+
+    @Before
+    fun setUp() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        Assume.assumeTrue(
+            "bundled model on the classpath",
+            javaClass.classLoader.getResource("models/ggml-tiny.en.bin") != null,
+        )
+        val dir = Files.createTempDirectory("whisper-server-test")
+        dir.toFile().deleteOnExit()
+        workDir = dir
+        val runtime = WhisperRuntime.ensureRuntime(dir, version, platformDir)
+        val candidate = runtime.cli.parent.resolve(
+            if (SystemInfo.isWindows) "whisper-server.exe" else "whisper-server",
+        )
+        Assume.assumeTrue("whisper-server is bundled for this platform", Files.isRegularFile(candidate))
+        serverBinary = candidate
+        // The server loads the model from a file path: extract the classpath copy into the work dir.
+        val modelFile = Files.createTempFile(dir, "ggml-tiny.en", ".bin")
+        javaClass.classLoader.getResourceAsStream("models/ggml-tiny.en.bin")!!.use { input ->
+            Files.copy(input, modelFile, StandardCopyOption.REPLACE_EXISTING)
+        }
+        model = modelFile
+    }
+
+    @After
+    fun tearDown() {
+        WhisperServerEngine.shutdown()
+        workDir?.toFile()?.deleteRecursively()
+    }
+
+    /** 1 s of a 440 Hz sine — deterministic, and not on the hallucination blocklist. */
+    private fun toneWav(): File {
+        val sr = AudioCapture.SAMPLE_RATE
+        val samples = ShortArray(sr) { i ->
+            (12_000 * kotlin.math.sin(2.0 * kotlin.math.PI * 440.0 * i / sr)).toInt().toShort()
+        }
+        val wav = File(workDir!!.toFile(), "tone.wav")
+        WavFile.write(wav, samples, AudioCapture.DEFAULT_FORMAT)
+        return wav
+    }
+
+    private fun serverTranscribe(wav: File): String = WhisperServerEngine.transcribeInternal(
+        wavFile = wav,
+        model = model!!,
+        language = WhisperLanguage.ENGLISH.code,
+        timeoutMs = 90_000,
+        useGpu = false,
+        threads = 4,
+        indicator = null,
+        serverBinary = serverBinary!!,
+        logFile = File(workDir!!.toFile(), "server.log"),
+        // No CLI fallback: the server path alone must produce the answer, or the test fails.
+        // This is what catches a malformed request body — the fallback would otherwise mask it.
+        allowFallback = false,
+    )
+
+    @Test
+    fun `a tone transcribes to non-blank text over the live server`() {
+        val text = serverTranscribe(toneWav())
+        assertFalse(
+            "a real audio tone must decode and yield text on the server path, got: '$text'",
+            text.isBlank(),
+        )
+    }
+
+    @Test
+    fun `a silent clip transcribes to blank text over the live server`() {
+        val wav = File(workDir!!.toFile(), "silence.wav")
+        WavFile.write(wav, ShortArray(AudioCapture.SAMPLE_RATE), AudioCapture.DEFAULT_FORMAT)
+        val text = serverTranscribe(wav)
+        assertTrue(
+            "silence must come back blank (hallucination blocklist), got: '$text'",
+            text.isBlank(),
+        )
     }
 }
