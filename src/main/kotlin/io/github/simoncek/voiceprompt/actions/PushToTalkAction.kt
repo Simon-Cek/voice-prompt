@@ -49,11 +49,17 @@ class PushToTalkAction : AnAction() {
 
         private val log = Logger.getInstance(PushToTalkAction::class.java)
 
-        private val capture = AudioCapture().also { it.onMaxDurationReached = { stop(activeProject()) } }
+        private val capture = AudioCapture().also { it.onMaxDurationReached = { stop() } }
         @Volatile private var watcherInstalled = false
         private val downKeys = HashMap<Int, Int>()
         private val chatSink = ChatSinkChain.default()
         @Volatile private var listeningNotification: Notification? = null
+        /**
+         * The project the current recording belongs to, captured when the recording starts. The
+         * stop paths (key release, max duration) carry no event project of their own, so delivery
+         * and notifications must target this project — not just the first-opened one.
+         */
+        @Volatile private var recordingProject: Project? = null
 
         val isRecording: Boolean get() = capture.isRecording()
 
@@ -82,7 +88,7 @@ class PushToTalkAction : AnAction() {
             }
             if (CopilotVoiceSettings.instance.mode != RecordingMode.HOLD) return
             val shortcut = currentShortcut() ?: return
-            if (isRecording && !comboStillHeld(shortcut)) stop(activeProject())
+            if (isRecording && !comboStillHeld(shortcut)) stop()
         }
 
         private fun activeProject(): Project? = ProjectManager.getInstance().openProjects.firstOrNull()
@@ -133,12 +139,18 @@ class PushToTalkAction : AnAction() {
             if (fellBack) {
                 notify(project, VoiceBundle.message("notification.mic.fallback", device!!), NotificationType.WARNING)
             }
+            recordingProject = project
             DictationState.set(true)
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStart()
             listeningNotification = notify(project, VoiceBundle["notification.listening"], NotificationType.INFORMATION)
         }
 
-        fun stop(project: Project?) {
+        fun stop(project: Project? = null) {
+            // Prefer the project the recording started in: the stop triggers (key release, max
+            // duration) carry no event project of their own, and the first-opened project would
+            // be the wrong target in a multi-project window.
+            val target = recordingProject ?: project
+            recordingProject = null
             if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
             dismissListening()
             val samples = capture.stop()
@@ -147,9 +159,9 @@ class PushToTalkAction : AnAction() {
             try {
                 val wavFile = File(System.getProperty("java.io.tmpdir"), "copilot-voice-${System.currentTimeMillis()}.wav")
                 WavFile.write(wavFile, samples, AudioCapture.DEFAULT_FORMAT)
-                transcribeInBackground(project, wavFile)
+                transcribeInBackground(target, wavFile)
             } catch (t: Exception) {
-                notify(project, VoiceBundle.message("notification.wav.failed", t.message ?: t.javaClass.simpleName), NotificationType.WARNING)
+                notify(target, VoiceBundle.message("notification.wav.failed", t.message ?: t.javaClass.simpleName), NotificationType.WARNING)
             }
         }
 
