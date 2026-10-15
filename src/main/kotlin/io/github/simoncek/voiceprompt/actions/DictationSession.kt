@@ -80,6 +80,11 @@ class DictationSession : Disposable {
     @Volatile private var startCancelled = false
     /** Bounded wait for the start tone before the mic opens (review #10 suggests 400 ms). */
     private val START_BEEP_WAIT_MS = 400L
+    /**
+     * Review #11: the slow devices report 1–2 s between press and first audio — 5 s of
+     * silence means the microphone is not really there, so we stop waiting and say so.
+     */
+    private val FIRST_SAMPLE_TIMEOUT_MS = 5_000L
 
     /** Whether the global AWT key watcher is installed (tests and diagnostics). */
     val isKeyWatcherInstalled: Boolean get() = keyWatcher != null
@@ -175,8 +180,7 @@ class DictationSession : Disposable {
         }
         if (startCancelled) {
             // A stop() ran while we were opening (a quick tap): the session is already torn down.
-            log.info("start cancelled while in progress")
-            status.setPhase(DictationPhase.IDLE)
+            abortCancelledStart()
             return
         }
         val device = CopilotVoiceSettings.instance.inputDevice
@@ -184,6 +188,10 @@ class DictationSession : Disposable {
             capture.start(device)
             false
         } catch (t: Exception) {
+            if (startCancelled) {
+                abortCancelledStart()
+                return
+            }
             if (device == null) {
                 status.setPhase(DictationPhase.IDLE)
                 notify(project, VoiceBundle.message("notification.mic.open.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
@@ -193,6 +201,10 @@ class DictationSession : Disposable {
             try {
                 capture.start()
             } catch (t2: Exception) {
+                if (startCancelled) {
+                    abortCancelledStart()
+                    return
+                }
                 status.setPhase(DictationPhase.IDLE)
                 notify(project, VoiceBundle.message("notification.mic.open.failed", t2.message ?: t2.javaClass.simpleName), NotificationType.ERROR)
                 return
@@ -202,8 +214,33 @@ class DictationSession : Disposable {
         if (fellBack) {
             notify(project, VoiceBundle.message("notification.mic.fallback", device!!), NotificationType.WARNING)
         }
+        // Review #11: the widget shows "Opening mic…" until audio is actually flowing — on the
+        // slow machines this delay is real, so "Recording" must mean "you can speak now". A key
+        // release in this window already ran stop() and set startCancelled.
+        val ready = capture.awaitFirstSample(FIRST_SAMPLE_TIMEOUT_MS)
+        if (startCancelled) {
+            capture.stop()
+            abortCancelledStart()
+            return
+        }
+        if (!ready) {
+            // The mic opened but never delivered audio: close the line, surface PROBLEM with a
+            // short reason (the widget must not sit on "Opening mic…" forever), and tell the user.
+            capture.stop()
+            log.warn("microphone opened but produced no audio within ${FIRST_SAMPLE_TIMEOUT_MS} ms")
+            val reason = VoiceBundle["statusbar.problem.mic.no.response"]
+            status.setPhase(DictationPhase.PROBLEM, reason)
+            notify(project, VoiceBundle["notification.mic.no.audio"], NotificationType.ERROR)
+            return
+        }
         recordingProject = project
         status.setPhase(DictationPhase.RECORDING)
+    }
+
+    /** A stop() arrived while the start sequence was still opening: tear down, back to Idle. */
+    private fun abortCancelledStart() {
+        log.info("start cancelled while in progress")
+        status.setPhase(DictationPhase.IDLE)
     }
 
     fun stop(project: Project? = null) {
@@ -212,12 +249,17 @@ class DictationSession : Disposable {
         // be the wrong target in a multi-project window.
         val target = recordingProject ?: project
         recordingProject = null
-        if (starting.get()) {
+        val cancelling = starting.get()
+        if (cancelling) {
             // A start sequence is still opening the mic (issue #10): cancel it, so it does not
             // start a recording this stop is already tearing down.
             startCancelled = true
         }
-        val samples = capture.stop()
+        // Review #11, item 4 (opt-in): keep the line open-but-stopped for the next start so it
+        // is instant. When this stop is cancelling an in-flight start, keep it off — a line the
+        // user just aborted should not be held open.
+        val keepSeconds = if (cancelling) 0L else CopilotVoiceSettings.instance.keepMicReadySeconds.toLong()
+        val samples = capture.stop(keepSeconds)
         // Stop tone only AFTER the capture line is closed (issue #10): before, it could bleed
         // into the tail of the captured clip.
         if (CopilotVoiceSettings.instance.soundEnabled) Beeps.recordingStop()
@@ -410,7 +452,8 @@ class DictationSession : Disposable {
     /**
      * Releases everything the session holds (AGENTS.md rule 2; review #6):
      *  - the AWT key watcher — while installed it pins the plugin class loader,
-     *  - the audio capture line (an in-flight recording is discarded),
+     *  - the audio capture line (an in-flight recording is discarded) and any pending
+     *    "keep microphone ready" close plus its daemon executor (review #11, item 4),
      *  - any whisper-cli process still running.
      *
      * Called by the platform on IDE shutdown and on dynamic plugin unload. Idempotent — it must
@@ -424,6 +467,8 @@ class DictationSession : Disposable {
         keyWatcher = null
         runCatching { capture.stop() }
             .onFailure { log.warn("failed to close the audio capture line on dispose", it) }
+        runCatching { capture.release() }
+            .onFailure { log.warn("failed to release the audio capture resources on dispose", it) }
         WhisperCliEngine.killActiveProcesses()
     }
 

@@ -28,6 +28,12 @@ class RecordingStatusWidgetTest {
     }
 
     @Test
+    fun `the problem face is always visible`() {
+        assertTrue(RecordingStatusWidget.isVisible(DictationPhase.PROBLEM, showIdleIndicator = true))
+        assertTrue(RecordingStatusWidget.isVisible(DictationPhase.PROBLEM, showIdleIndicator = false))
+    }
+
+    @Test
     fun `click opens settings only when idle`() {
         assertEquals(RecordingStatusWidget.ClickAction.OPEN_SETTINGS, RecordingStatusWidget.clickAction(DictationPhase.IDLE))
     }
@@ -41,5 +47,10 @@ class RecordingStatusWidgetTest {
     @Test
     fun `click does nothing while transcribing`() {
         assertEquals(RecordingStatusWidget.ClickAction.NONE, RecordingStatusWidget.clickAction(DictationPhase.TRANSCRIBING))
+    }
+
+    @Test
+    fun `click on the problem face opens settings`() {
+        assertEquals(RecordingStatusWidget.ClickAction.OPEN_SETTINGS, RecordingStatusWidget.clickAction(DictationPhase.PROBLEM))
     }
 }

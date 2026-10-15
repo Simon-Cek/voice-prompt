@@ -1,5 +1,6 @@
 package io.github.simoncek.voiceprompt.statusbar
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
@@ -20,20 +21,23 @@ import javax.swing.JLabel
 /**
  * Persistent, non-expiring indicator of what dictation is doing.
  *
- * Always a small mic icon followed by a text label that changes with the phase: "Voice Prompt"
+ * Always a small icon followed by a text label that changes with the phase: "Voice Prompt"
  * while idle, then "Opening mic…" / "Recording" / "Transcribing…", with a phase tooltip on
- * hover. Only the idle face is hideable — via the "Show status bar indicator when idle"
- * setting — the active-phase faces are always shown. The label stays until the phase changes:
- * no auto-hide, unlike the old balloon (issue #5).
+ * hover. The PROBLEM face uses the platform warning glyph and shows its short reason (e.g.
+ * "Mic did not respond") so the bar never sits on "Opening mic…" after a failed start. Only
+ * the idle face is hideable — via the "Show status bar indicator when idle" setting — the
+ * active and problem faces are always shown. The label stays until the phase changes: no
+ * auto-hide, unlike the old balloon (issue #5).
  *
  * A pure view of [DictationStatus]: it never owns or infers state, so it cannot disagree with
  * the recorder. The platform creates one instance per project window (see
  * [RecordingStatusWidgetFactory]); all instances watch the same application-level state, so
  * the status bar of every open project window stays in step.
  *
- * Clicking: the idle icon opens the plugin's settings page; while OPENING or RECORDING the
- * click stops the recording (the manual escape hatch for a stuck recording if a key release
- * was lost); while TRANSCRIBING it does nothing — the inference is already in flight.
+ * Clicking: the idle icon and the PROBLEM face open the plugin's settings page (from a problem
+ * you can go fix the device/model); while OPENING or RECORDING a click stops the recording (the
+ * manual escape hatch for a stuck recording if a key release was lost); while TRANSCRIBING it
+ * does nothing — the inference is already in flight.
  */
 class RecordingStatusWidget(private val project: Project) : IconLikeCustomStatusBarWidget {
 
@@ -101,13 +105,18 @@ class RecordingStatusWidget(private val project: Project) : IconLikeCustomStatus
     }
 
     private fun applyContent(phase: DictationPhase) {
-        // The mic icon is permanent in every phase; only the text label changes with the phase.
-        view.icon = MIC_ICON
-        view.text = if (phase == DictationPhase.IDLE) VoiceBundle["statusbar.idle"] else textFor(phase)
-        view.toolTipText = tooltipFor(phase)
+        view.icon = iconFor(phase)
+        // PROBLEM carries its own short reason (e.g. "Mic did not respond"); every other phase
+        // has a fixed label.
+        val problem = if (phase == DictationPhase.PROBLEM) status.problem else null
+        view.text = if (phase == DictationPhase.IDLE) VoiceBundle["statusbar.idle"] else textFor(phase, problem)
+        view.toolTipText = tooltipFor(phase, problem)
         view.revalidate()
         view.repaint()
     }
+
+    private fun iconFor(phase: DictationPhase): Icon =
+        if (phase == DictationPhase.PROBLEM) PROBLEM_ICON else MIC_ICON
 
     private fun onClick() {
         when (clickAction(status.phase)) {
@@ -134,28 +143,37 @@ class RecordingStatusWidget(private val project: Project) : IconLikeCustomStatus
             IconLoader.getIcon("/icons/mic.svg", RecordingStatusWidget::class.java.classLoader)
         }
 
+        /**
+         * The PROBLEM face: the platform's standard warning glyph (theme-aware, no hardcoded
+         * color). This is the icon the parked 5-state rework plans for PROBLEM, so it is
+         * introduced here with the first PROBLEM state rather than reworked later.
+         */
+        val PROBLEM_ICON: Icon by lazy { AllIcons.General.BalloonWarning }
+
         /** Whether the widget should occupy the status bar in [phase], given the idle setting. */
         internal fun isVisible(phase: DictationPhase, showIdleIndicator: Boolean): Boolean =
             phase != DictationPhase.IDLE || showIdleIndicator
 
         internal fun clickAction(phase: DictationPhase): ClickAction = when (phase) {
-            DictationPhase.IDLE -> ClickAction.OPEN_SETTINGS
+            DictationPhase.IDLE, DictationPhase.PROBLEM -> ClickAction.OPEN_SETTINGS
             DictationPhase.OPENING, DictationPhase.RECORDING -> ClickAction.STOP_RECORDING
             DictationPhase.TRANSCRIBING -> ClickAction.NONE
         }
 
-        private fun textFor(phase: DictationPhase): String = when (phase) {
+        private fun textFor(phase: DictationPhase, problem: String?): String = when (phase) {
             DictationPhase.OPENING -> VoiceBundle["statusbar.opening"]
             DictationPhase.RECORDING -> VoiceBundle["statusbar.recording"]
             DictationPhase.TRANSCRIBING -> VoiceBundle["statusbar.transcribing"]
+            DictationPhase.PROBLEM -> problem ?: VoiceBundle["statusbar.problem"]
             DictationPhase.IDLE -> ""
         }
 
-        private fun tooltipFor(phase: DictationPhase): String = when (phase) {
+        private fun tooltipFor(phase: DictationPhase, problem: String?): String = when (phase) {
             DictationPhase.IDLE -> VoiceBundle["statusbar.tooltip.ready"]
             DictationPhase.OPENING -> VoiceBundle["statusbar.tooltip.opening"]
             DictationPhase.RECORDING -> VoiceBundle["statusbar.tooltip.recording"]
             DictationPhase.TRANSCRIBING -> VoiceBundle["statusbar.tooltip.transcribing"]
+            DictationPhase.PROBLEM -> problem ?: VoiceBundle["statusbar.problem"]
         }
     }
 }

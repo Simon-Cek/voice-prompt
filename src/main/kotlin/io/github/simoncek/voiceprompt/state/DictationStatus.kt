@@ -23,6 +23,9 @@ class DictationStatus : Disposable {
     /** The current phase; safe to read from any thread. */
     val phase: DictationPhase get() = tracker.phase
 
+    /** A short reason while [phase] is PROBLEM (e.g. "Mic did not respond"); null otherwise. */
+    val problem: String? get() = tracker.problem
+
     /** True while the capture line is open (the microphone is busy with dictation). */
     val isCapturing: Boolean get() = tracker.phase.isCapturing
 
@@ -35,9 +38,9 @@ class DictationStatus : Disposable {
         tracker.removeListener(listener)
     }
 
-    /** Updates the phase; listeners run on the EDT even when this is called from a worker thread. */
-    fun setPhase(newPhase: DictationPhase) {
-        val invoke = { tracker.setPhase(newPhase) }
+    /** Updates the phase (and, for PROBLEM, a short reason); listeners run on the EDT. */
+    fun setPhase(newPhase: DictationPhase, problem: String? = null) {
+        val invoke = { tracker.setPhase(newPhase, problem) }
         if (EventQueue.isDispatchThread()) {
             invoke()
         } else {

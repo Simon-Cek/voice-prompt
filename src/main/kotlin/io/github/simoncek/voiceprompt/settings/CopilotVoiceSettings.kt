@@ -31,6 +31,11 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         var bundledModelDeleted: Boolean = false
         /** Show the status bar mic icon while dictation is idle (the widget still shows text while active). */
         var showIdleIndicator: Boolean = true
+        /**
+         * Review #11, item 4 (opt-in): keep the microphone line open-but-stopped for this many
+         * seconds after a stop so the next start is instant. 0 (default) = off.
+         */
+        var keepMicReadySeconds: Int = 0
     }
 
     private val state = State()
@@ -94,6 +99,13 @@ class CopilotVoiceSettings : PersistentStateComponent<CopilotVoiceSettings.State
         set(value) {
             state.showIdleIndicator = value
             idleIndicatorListeners.forEach { it() }
+        }
+
+    /** Keep the microphone line ready after a stop, in seconds (0 = off). See [State.keepMicReadySeconds]. */
+    var keepMicReadySeconds: Int
+        get() = state.keepMicReadySeconds
+        set(value) {
+            state.keepMicReadySeconds = value
         }
 
     // The status bar widget decides its idle visibility from this setting and re-renders on

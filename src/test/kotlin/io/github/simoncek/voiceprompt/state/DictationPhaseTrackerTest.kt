@@ -20,6 +20,40 @@ class DictationPhaseTrackerTest {
         assertTrue(DictationPhase.OPENING.isCapturing)
         assertTrue(DictationPhase.RECORDING.isCapturing)
         assertFalse(DictationPhase.TRANSCRIBING.isCapturing)
+        assertFalse(DictationPhase.PROBLEM.isCapturing)
+    }
+
+    @Test
+    fun `the problem reason is carried only while in the problem state`() {
+        val tracker = DictationPhaseTracker()
+        tracker.setPhase(DictationPhase.PROBLEM, "Mic did not respond")
+        assertEquals(DictationPhase.PROBLEM, tracker.phase)
+        assertEquals("Mic did not respond", tracker.problem)
+
+        // Leaving PROBLEM clears the reason — a stale reason must not leak into another phase.
+        tracker.setPhase(DictationPhase.IDLE)
+        assertEquals(DictationPhase.IDLE, tracker.phase)
+        assertEquals(null, tracker.problem)
+    }
+
+    @Test
+    fun `a non-problem phase never carries a reason`() {
+        val tracker = DictationPhaseTracker()
+        tracker.setPhase(DictationPhase.OPENING, "should be dropped")
+        assertEquals(DictationPhase.OPENING, tracker.phase)
+        assertEquals(null, tracker.problem)
+    }
+
+    @Test
+    fun `re-setting the same problem reason does not re-notify`() {
+        val tracker = DictationPhaseTracker()
+        val seen = mutableListOf<DictationPhase>()
+        tracker.addListener { seen += it }
+
+        tracker.setPhase(DictationPhase.PROBLEM, "Mic did not respond")
+        tracker.setPhase(DictationPhase.PROBLEM, "Mic did not respond") // unchanged: no notification
+
+        assertEquals(listOf(DictationPhase.PROBLEM), seen)
     }
 
     @Test

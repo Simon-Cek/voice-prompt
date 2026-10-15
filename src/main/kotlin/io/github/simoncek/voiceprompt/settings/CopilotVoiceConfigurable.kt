@@ -127,6 +127,10 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                 }.bind({ s.mode }, { s.mode = it })
 
                 row {
+                    label(VoiceBundle["recordingMode.hint"]).applyToComponent { foreground = JBColor.GRAY }
+                }
+
+                row {
                     checkBox(VoiceBundle["sound.enabled"])
                         .bindSelected({ s.soundEnabled }, { s.soundEnabled = it })
                 }
@@ -141,6 +145,15 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                     checkBox(VoiceBundle["settings.statusbar.idle"])
                         .bindSelected({ s.showIdleIndicator }, { s.showIdleIndicator = it })
                         .comment(VoiceBundle["settings.statusbar.idle.hint"])
+                }
+
+                row(VoiceBundle["settings.keepready.title"]) {
+                    comboBox(
+                        listOf(0, 10, 20, 30, 60),
+                        TextCellRenderer<Int> { keepReadyLabel(it) },
+                    ).bindItem({ s.keepMicReadySeconds }, { s.keepMicReadySeconds = it ?: 0 })
+                        .widthGroup("voiceCombos")
+                        .comment(VoiceBundle["settings.keepready.hint"])
                 }
 
                 row(VoiceBundle["settings.input.title"]) {
@@ -372,6 +385,11 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
         ProcessingMode.CPU -> VoiceBundle["processing.cpu"]
         ProcessingMode.GPU -> VoiceBundle["processing.gpu"]
     }
+
+    /** "Off" for 0, else "{n} s". */
+    private fun keepReadyLabel(seconds: Int): String =
+        if (seconds == 0) VoiceBundle["settings.keepready.off"]
+        else VoiceBundle.message("settings.keepready.seconds", seconds)
 
     /** "System default" first, then every capture (input) mixer. */
     private fun inputDeviceNames(): List<String> = buildList {
