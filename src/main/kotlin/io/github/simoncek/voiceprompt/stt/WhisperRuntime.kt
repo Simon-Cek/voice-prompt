@@ -222,8 +222,9 @@ object WhisperRuntime {
 
     /**
      * The bundled whisper-server (review P2) for this platform, or null when the platform bundle
-     * ships no server binary (Windows for now — no cross-built .exe in the bundle). The binary is
-     * part of the checksum-verified runtime, so resolving it also guarantees the libraries it
+     * ships no server binary. Both bundled builds (b5454) ship one — the Windows .exe was added
+     * by review N10 from the same upstream release the rest of the bundle came from. The binary
+     * is part of the checksum-verified runtime, so resolving it also guarantees the libraries it
      * links are extracted next to it.
      */
     fun serverPath(): Path? {
