@@ -128,19 +128,29 @@ object WhisperServerEngine {
     internal var startupTimeoutMsForTest: Long? = null
     private val startupTimeoutMs: Long get() = startupTimeoutMsForTest ?: STARTUP_TIMEOUT_MS
 
-    private val client: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
-
-    /** Daemon so it can never keep the JVM alive; stopped with the plugin in [shutdown]. */
-    private val idleReaper: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "whisper-server-idle-reaper").apply { isDaemon = true }
+    // Review N13: created on first use, not on object init — [shutdown] (called from
+    // DictationSession.dispose on every unload, including CLI-only ones) checks isInitialized()
+    // without touching the values, so a plugin that never used the long-lived server creates no
+    // HttpClient and no reaper thread at all.
+    private val clientLazy: Lazy<HttpClient> = lazy {
+        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
     }
 
-    init {
-        idleReaper.scheduleWithFixedDelay(
+    private val client: HttpClient get() = clientLazy.value
+
+    private val idleReaperLazy: Lazy<ScheduledExecutorService> = lazy {
+        val reaper = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "whisper-server-idle-reaper").apply { isDaemon = true }
+        }
+        // Daemon so it can never keep the JVM alive; stopped with the plugin in [shutdown].
+        reaper.scheduleWithFixedDelay(
             { runCatching { reapIdle() }.onFailure { log.warn("idle reaper pass failed", it) } },
             IDLE_CHECK_PERIOD_MS, IDLE_CHECK_PERIOD_MS, TimeUnit.MILLISECONDS,
         )
+        reaper
     }
+
+    private val idleReaper: ScheduledExecutorService get() = idleReaperLazy.value
 
     /**
      * Transcribes [wavFile] with the long-lived server, falling back to the one-shot CLI when the
@@ -615,7 +625,7 @@ object WhisperServerEngine {
     fun shutdown() {
         synchronized(LOCK) { shuttingDown = true }
         stopCurrent()
-        idleReaper.shutdownNow()
+        if (idleReaperLazy.isInitialized()) idleReaperLazy.value.shutdownNow()
     }
 
     /**
@@ -648,7 +658,7 @@ object WhisperServerEngine {
             starting = null
             p to f
         }
-        idleReaper.shutdownNow()
+        if (idleReaperLazy.isInitialized()) idleReaperLazy.value.shutdownNow()
         oldProcess?.let { stopProcess(it) }
         inFlight?.process?.let { it.destroyForcibly() }
         startupTimeoutMsForTest = null

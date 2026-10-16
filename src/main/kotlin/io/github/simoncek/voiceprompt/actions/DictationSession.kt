@@ -1002,7 +1002,8 @@ class DictationSession : Disposable {
      *  - the AWT key watcher — while installed it pins the plugin class loader,
      *  - the audio capture line (an in-flight recording is discarded) and any pending
      *    "keep microphone ready" close plus its daemon executor (review #11, item 4),
-     *  - any whisper-cli process still running.
+     *  - any whisper-cli process still running,
+     *  - the long-lived whisper-server and the beep executor's daemon thread (review N13).
      *
      * Called by the platform on IDE shutdown and on dynamic plugin unload. Idempotent — it must
      * not throw if called more than once.
@@ -1021,6 +1022,9 @@ class DictationSession : Disposable {
         // The long-lived whisper-server (review P2) outlives any single utterance, so it gets an
         // explicit stop here as well — otherwise it would outlive the plugin (review #6).
         WhisperServerEngine.shutdown()
+        // The beep executor's daemon thread would outlive the plugin and pin its class loader
+        // (review N13); a no-op if no beep was ever played.
+        Beeps.shutdown()
     }
 
     companion object {
