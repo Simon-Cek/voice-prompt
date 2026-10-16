@@ -27,9 +27,13 @@ class AudioCapture(
         private const val STOP_JOIN_TIMEOUT_MS = 2_000L
         private const val DEFAULT_NO_DATA_LOSS_MS = 2_000L
 
-        // Review #11, item 6: request ~100 ms of line buffer, not a whole second — a big
-        // buffer delays the first read() that "ready" (awaitFirstSample) waits for.
-        private val BUFFER_FRAMES = SAMPLE_RATE / 10
+        // Review N7: the line buffer is requested in BYTES — TargetDataLine.open(format, size)
+        // takes a byte count, and the old 1,600 was a frame count (50 ms, exactly one read
+        // chunk), so a scheduling hiccup (GC, a saturated core) could overrun the buffer and
+        // drop audio silently. A bigger buffer cannot delay the first sample: read() blocks
+        // for one chunk regardless of the buffer size — and the start-to-first-sample gap is
+        // debug-logged on each awaitFirstSample success to keep that honest (review N7).
+        private const val BUFFER_MS = 250L
 
         // [sampleState] transitions: AWAITING -> DATA (first read() delivered audio) or
         // AWAITING -> STOPPED (the capture ended before audio arrived).
@@ -43,6 +47,15 @@ class AudioCapture(
     }
 
     private val log = Logger.getInstance(AudioCapture::class.java)
+
+    /**
+     * Review N7: the line buffer in BYTES — about [BUFFER_MS] of audio, computed from the
+     * capture format (not a hardcoded rate/bit-depth) and aligned to a whole number of frames.
+     */
+    private val bufferBytes: Int = ((format.sampleRate * BUFFER_MS / 1000).toInt()) * format.frameSize
+
+    /** Wall time (ms) [start] began; the awaitFirstSample success logs the gap to the first sample. */
+    @Volatile private var startWallMs = 0L
 
     private val buffer = ByteArrayOutputStream()
     private val recording = AtomicBoolean(false)
@@ -122,6 +135,7 @@ class AudioCapture(
         if (!recording.compareAndSet(false, true)) {
             throw IllegalStateException("Already recording")
         }
+        startWallMs = System.currentTimeMillis()
         keepReadyTask?.cancel(false)
         lineGeneration++
         val opened = try {
@@ -173,7 +187,13 @@ class AudioCapture(
         val deadline = System.currentTimeMillis() + timeoutMs
         while (true) {
             when (sampleState) {
-                DATA -> return true
+                DATA -> {
+                    // Review N7: the start-to-first-sample gap, so the larger line buffer can
+                    // be verified (Windows and Linux) not to delay it — numbers only.
+                    log.debug("first sample after ${System.currentTimeMillis() - startWallMs} ms " +
+                        "(requested buffer ${bufferBytes} bytes)")
+                    return true
+                }
                 STOPPED -> return false
                 else -> Unit
             }
@@ -257,7 +277,11 @@ class AudioCapture(
                 return OpenedLine(cached, reused = true)
             }
             try {
-                cached.open(format, BUFFER_FRAMES)
+                cached.open(format, bufferBytes)
+                // Review N7: numbers only — lets us see whether a driver rounds or ignores the
+                // requested buffer size.
+                log.debug("kept line re-opened: requested buffer ${bufferBytes} bytes, " +
+                    "driver reports ${cached.bufferSize} bytes")
                 return OpenedLine(cached, reused = true)
             } catch (t: Throwable) {
                 // The device went away (unplugged?) or the driver wedged: drop the cache and
@@ -274,7 +298,11 @@ class AudioCapture(
     private fun resolveFreshLine(mixerName: String?): TargetDataLine {
         val factory = lineFactoryForTest
         val dataLine = if (factory != null) factory(mixerName, format) else MicrophoneResolver.resolve(mixerName, format)
-        dataLine.open(format, BUFFER_FRAMES)
+        dataLine.open(format, bufferBytes)
+        // Review N7: numbers only — lets us see whether a driver rounds or ignores the
+        // requested buffer size.
+        log.debug("capture line opened: requested buffer ${bufferBytes} bytes, " +
+            "driver reports ${dataLine.bufferSize} bytes")
         line = dataLine
         lineDevice = mixerName
         return dataLine

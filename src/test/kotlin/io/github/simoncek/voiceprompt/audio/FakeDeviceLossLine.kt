@@ -19,6 +19,8 @@ import javax.sound.sampled.TargetDataLine
 internal class FakeDeviceLossLine : TargetDataLine {
 
     val calls = CopyOnWriteArrayList<String>()
+    /** Buffer sizes (bytes) requested via open(format, size), in order — review N7. */
+    val openedSizes = CopyOnWriteArrayList<Int>()
     private val buffered = ArrayDeque<ByteArray>()
 
     /** Fake time (ms) the read loop's loss window observes; advanced by [tickMs] on every read. */
@@ -54,6 +56,7 @@ internal class FakeDeviceLossLine : TargetDataLine {
 
     override fun open(format: AudioFormat?, bufferSize: Int) {
         calls.add("open")
+        openedSizes.add(bufferSize)
         opened = true
     }
 
