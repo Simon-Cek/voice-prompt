@@ -25,6 +25,7 @@ class AudioCapture(
         private const val CHUNK_FRAMES = 800
         private const val UNDERFLOW_SLEEP_MS = 10L
         private const val STOP_JOIN_TIMEOUT_MS = 2_000L
+        private const val DEFAULT_NO_DATA_LOSS_MS = 2_000L
 
         // Review #11, item 6: request ~100 ms of line buffer, not a whole second — a big
         // buffer delays the first read() that "ready" (awaitFirstSample) waits for.
@@ -74,6 +75,28 @@ class AudioCapture(
      */
     internal @Volatile var lineFactoryForTest: ((mixerName: String?, format: AudioFormat) -> TargetDataLine)? = null
 
+    /**
+     * Test seam (review N6): the clock the read loop uses to time the no-data loss window (ms).
+     * Null (the default) = [System.currentTimeMillis]. Tests reset it to null in tearDown.
+     */
+    internal @Volatile var clockMsForTest: (() -> Long)? = null
+
+    /**
+     * Review N6: how long a confirmed live capture (audio already flowing) may go without a
+     * positive read before the read loop reports a device loss. A test seam like
+     * [clockMsForTest]; the default is about two seconds.
+     */
+    internal @Volatile var noDataLossMs: Long = DEFAULT_NO_DATA_LOSS_MS
+
+    /**
+     * Review N6: set by the read loop when the device stopped delivering mid-recording — the
+     * next [stop] must close the line instead of keeping it ready (a dead line is never cached
+     * or reused). Consumed (cleared) by [stop].
+     */
+    @Volatile private var deviceLost = false
+
+    private fun clockMs(): Long = clockMsForTest?.invoke() ?: System.currentTimeMillis()
+
     // One daemon thread for the deferred "close the kept-ready line" — never a new thread
     // per event (the review's #10 rule for Beeps applies here too), and daemon so it cannot
     // hold the IDE shutdown or the plugin class loader (review #6).
@@ -84,6 +107,13 @@ class AudioCapture(
 
     /** Invoked from the capture thread when [maxDurationSeconds] of audio has been collected. */
     var onMaxDurationReached: (() -> Unit)? = null
+
+    /**
+     * Invoked from the capture thread when the microphone stops delivering mid-recording
+     * (review N6): a confirmed live capture went silent for [noDataLossMs], the line was closed
+     * by the OS, or a read threw. The session surfaces PROBLEM and stops the capture.
+     */
+    var onDeviceLost: (() -> Unit)? = null
 
     fun isRecording(): Boolean = recording.get()
 
@@ -175,7 +205,11 @@ class AudioCapture(
         readerThread = null
         val dataLine = line
         lineGeneration++
-        if (keepReadySeconds > 0 && dataLine != null) {
+        // Review N6: a line the device lost mid-recording is never kept ready — a dead line must
+        // not be cached or reused — so the close path applies even if keep-ready was requested.
+        val keepReady = keepReadySeconds > 0 && dataLine != null && !deviceLost
+        deviceLost = false
+        if (keepReady) {
             runCatching { dataLine.stop() }
             scheduleKeepReadyClose(dataLine, keepReadySeconds)
         } else {
@@ -196,6 +230,9 @@ class AudioCapture(
         keepReadyTask?.cancel(false)
         keepReadyExecutor.shutdownNow()
         synchronized(this) {
+            // Review N6: end the capture before the line goes — a reader mid-loop must not
+            // misread our own teardown as a device loss (its loss guard checks [recording]).
+            recording.set(false)
             lineGeneration++
             runCatching { line?.close() }
             line = null
@@ -298,17 +335,51 @@ class AudioCapture(
     private fun readLoop(dataLine: TargetDataLine) {
         val chunk = ByteArray(CHUNK_FRAMES * format.frameSize)
         val maxBytes = (maxDurationSeconds * format.sampleRate * format.frameSize).toInt()
+        var lastPositiveReadMs = clockMs()
         try {
             while (recording.get()) {
-                val read = dataLine.read(chunk, 0, chunk.size)
+                val read = try {
+                    dataLine.read(chunk, 0, chunk.size)
+                } catch (t: Exception) {
+                    // The OS took the line away mid-read (an unplug, a profile switch): end the
+                    // capture as a device loss rather than letting the reader thread die silently
+                    // (review N6). A normal stop()/release() has already cleared [recording], so
+                    // it is never misread as a loss.
+                    if (recording.get()) {
+                        deviceLost = true
+                        onDeviceLost?.invoke()
+                    }
+                    break
+                }
                 if (read > 0) {
+                    lastPositiveReadMs = clockMs()
                     if (sampleState == AWAITING) sampleState = DATA
                     buffer.write(chunk, 0, read)
                     if (buffer.size() >= maxBytes) {
                         onMaxDurationReached?.invoke()
                         break
                     }
-                } else if (read < 0) {
+                } else {
+                    // Review N6: a non-positive read on a live line. A healthy mic underflows
+                    // (read < 0) and that is normal — sleep (which also kills the CPU spin a bare
+                    // retry caused) and retry. But a line the OS has stopped or closed keeps
+                    // returning 0 (or -1) without blocking, so also watch the line's open state
+                    // and the time since the last positive read: once a confirmed live capture —
+                    // audio already flowing, so before that awaitFirstSample's timeout owns the
+                    // failure — has been silent too long, the device is gone: end the capture and
+                    // let the session surface PROBLEM.
+                    if (recording.get()) {
+                        if (!dataLine.isOpen) {
+                            deviceLost = true
+                            onDeviceLost?.invoke()
+                            break
+                        }
+                        if (sampleState == DATA && clockMs() - lastPositiveReadMs >= noDataLossMs) {
+                            deviceLost = true
+                            onDeviceLost?.invoke()
+                            break
+                        }
+                    }
                     Thread.sleep(UNDERFLOW_SLEEP_MS)
                 }
             }

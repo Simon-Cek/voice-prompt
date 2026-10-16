@@ -87,7 +87,12 @@ class DictationSession : Disposable {
 
     private val log = Logger.getInstance(DictationSession::class.java)
 
-    private val capture = AudioCapture().also { it.onMaxDurationReached = { stop() } }
+    private val capture = AudioCapture().also {
+        it.onMaxDurationReached = { stop() }
+        // Review N6: the capture's reader thread reports the mic stopped delivering — surface
+        // PROBLEM and tear the session down through the normal stop path.
+        it.onDeviceLost = { onMicLost() }
+    }
     @Volatile private var keyWatcher: AWTEventListener? = null
     private val chatSink = ChatSinkChain.default()
     /** The shared dictation phase; the status bar widget and the mic test are read-only views. */
@@ -407,6 +412,20 @@ class DictationSession : Disposable {
     }
 
     /**
+     * Review N6: the capture's reader thread reports the microphone stopped delivering
+     * mid-recording (a device loss). Surface PROBLEM with a short reason, tell the user (the
+     * captured part still transcribes through the normal stop path), and tear the session down.
+     * [stop]'s claim (review N2) makes this safe even if the user releases the key at the same
+     * instant — the second stop is dropped.
+     */
+    internal fun onMicLost() {
+        lastProblem = VoiceBundle["statusbar.problem.mic.lost"]
+        recomputePhase()
+        notify(recordingProject, VoiceBundle["notification.mic.lost"], NotificationType.ERROR)
+        stop()
+    }
+
+    /**
      * Ends the recording and hands the clip to transcription.
      *
      * Review P4: the stop tail is blocking — `capture.stop()` joins the reader thread (up to
@@ -565,6 +584,16 @@ class DictationSession : Disposable {
      */
     internal fun setAudioConfirmedForTest(value: Boolean) {
         audioConfirmed = value
+        recomputePhase()
+    }
+
+    /**
+     * Test seam (review N6): clear the [lastProblem] fact and recompute the phase — so a test
+     * that drives [onMicLost] can leave the shared [DictationStatus] on IDLE for the next test
+     * class, exactly as a new session's claim would.
+     */
+    internal fun clearProblemForTest() {
+        lastProblem = null
         recomputePhase()
     }
 

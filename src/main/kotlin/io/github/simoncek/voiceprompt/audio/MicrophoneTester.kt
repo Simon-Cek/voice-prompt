@@ -75,7 +75,17 @@ class MicrophoneTester(
             val startTime = System.currentTimeMillis()
             while (running.get() && System.currentTimeMillis() - startTime < 10_000) {
                 val n = l.read(buffer, 0, buffer.size)
-                if (n <= 0) continue
+                if (!l.isOpen) break // the device went away mid-test (review N6)
+                if (n <= 0) {
+                    // Review N6: sleep instead of a bare continue (which spun the CPU); the 10 s
+                    // wall clock above already bounds the wait.
+                    try {
+                        Thread.sleep(10)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                    continue
+                }
                 val v = (rms(buffer, n) * 6).coerceIn(0.0, 1.0)
                 smoothed = if (v > smoothed) v else smoothed * 0.85 + v * 0.15
                 if (v > peak) peak = v
