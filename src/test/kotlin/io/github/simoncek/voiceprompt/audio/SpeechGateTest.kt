@@ -45,6 +45,59 @@ class SpeechGateTest {
         assertTrue("normal speech level must be above the floor", SpeechGate.rms(ShortArray(16000) { 2500.toShort() }) > SpeechGate.MIN_RMS)
     }
 
+    // Review N17: the gate must not discard a clip because its whole-clip average is diluted
+    // below the floor by pauses and a quiet mic — the level is measured per 50 ms window.
+
+    @Test
+    fun `a clip whose average is diluted below the floor still passes the gate`() {
+        // 10 s of ambient noise (40) with one 50 ms speech burst (1200): the whole-clip RMS is
+        // ~94, below the floor — the pre-N17 gate discarded this clip — while the burst's own
+        // window sits well above it.
+        val sampleRate = 16000
+        val clip = ShortArray(10 * sampleRate) { 40.toShort() }
+        val window = (SpeechGate.WINDOW_MS * sampleRate / 1000).toInt()
+        for (i in 0 until window) clip[window + i] = 1200.toShort()
+
+        assertTrue(
+            "the whole-clip average must be below the floor (the pre-N17 gate would discard this clip)",
+            SpeechGate.rms(clip) < SpeechGate.MIN_RMS,
+        )
+        assertTrue(
+            "review N17: the highest 50 ms window must carry the clip above the floor",
+            SpeechGate.speechLevel(clip, sampleRate) >= SpeechGate.MIN_RMS,
+        )
+    }
+
+    @Test
+    fun `speechLevel is the highest window rms`() {
+        // 2 s of 40 with one 50 ms window at 1200: every window but one measures 40, one 1200.
+        val sampleRate = 16000
+        val window = (SpeechGate.WINDOW_MS * sampleRate / 1000).toInt()
+        val clip = ShortArray(2 * sampleRate) { 40.toShort() }
+        for (i in 0 until window) clip[3 * window + i] = 1200.toShort()
+        assertEquals(1200f, SpeechGate.speechLevel(clip, sampleRate), 1f)
+    }
+
+    @Test
+    fun `speechLevel still rejects pure ambient noise`() {
+        assertTrue(SpeechGate.speechLevel(ShortArray(2 * 16000) { 40.toShort() }, 16000) < SpeechGate.MIN_RMS)
+    }
+
+    @Test
+    fun `speechLevel of a clean speech clip is its level`() {
+        assertEquals(2500f, SpeechGate.speechLevel(ShortArray(16000) { 2500.toShort() }, 16000), 1f)
+    }
+
+    @Test
+    fun `speechLevel of an empty clip is zero`() {
+        assertEquals(0f, SpeechGate.speechLevel(ShortArray(0), 16000))
+    }
+
+    @Test
+    fun `a clip shorter than one window is measured whole`() {
+        assertEquals(1500f, SpeechGate.speechLevel(ShortArray(100) { 1500.toShort() }, 16000), 1f)
+    }
+
     @Test
     fun `a 400 ms clip at 16 kHz is exactly the minimum`() {
         val atMinimum = 16000 * 400 / 1000

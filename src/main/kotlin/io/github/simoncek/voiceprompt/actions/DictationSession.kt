@@ -577,9 +577,12 @@ class DictationSession : Disposable {
             recomputePhase()
             return
         }
-        val rms = SpeechGate.rms(samples)
-        if (rms < SpeechGate.MIN_RMS) {
-            log.info("discarding clip: rms=$rms below the ${SpeechGate.MIN_RMS} speech floor")
+        // Review N17: the gate asks "is there speech anywhere in this clip" — the highest 50 ms
+        // window level, not the whole-clip average, which a quiet mic and the clip's pauses
+        // would dilute below the floor and discard a real utterance.
+        val level = SpeechGate.speechLevel(samples, sampleRate)
+        if (level < SpeechGate.MIN_RMS) {
+            log.info("discarding clip: level=$level (highest ${SpeechGate.WINDOW_MS} ms window) below the ${SpeechGate.MIN_RMS} speech floor")
             noSpeech(target)
             recomputePhase()
             return
