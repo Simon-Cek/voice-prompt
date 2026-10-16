@@ -689,10 +689,10 @@ class DictationSession : Disposable {
         }
         if (!queued) {
             // Review N4: the task never runs (a failed queue() in production, a failed hand-off
-            // in the test) — release the clip here, or the counter never drops and the phase
-            // can never return to IDLE.
-            releaseTranscription(handle)
-            runCatching { wavFile.delete() }
+            // in the test) — release the clip and remove the WAV here, or the counter never
+            // drops and the phase can never return to IDLE. Same end-point as the task hooks
+            // (review N16); the failed start additionally says so.
+            finishClip(handle, wavFile)
             val reason = failed?.message ?: failed?.javaClass?.simpleName ?: "the transcription task could not be started"
             notify(project, VoiceBundle.message("notification.wav.failed", reason), NotificationType.WARNING)
         }
@@ -709,18 +709,22 @@ class DictationSession : Disposable {
                 transcribeBody(indicator, project, wavFile, handle)
             }
             // Review N4: the clip is released exactly once by whichever exit path takes it
-            // first (releaseOnce in [releaseTranscription]). These hooks cover a task
-            // that is cancelled before or without running [run]; a duplicate release is a no-op.
+            // first (releaseOnce in [releaseTranscription]); a duplicate is a no-op.
+            // Review N16: these hooks are the exit for a clip whose task never ran (cancelled
+            // before start — a project close, or the platform dropping a queued task). They
+            // must also remove the WAV, which [transcribeBody] never got to do: [finishClip]
+            // is idempotent, so a hook firing after transcribeBody's finally already ended a
+            // clip that did run is a no-op.
             override fun onFinished() {
-                releaseTranscription(handle)
+                finishClip(handle, wavFile)
             }
 
             override fun onCancel() {
-                releaseTranscription(handle)
+                finishClip(handle, wavFile)
             }
 
             override fun onThrowable(t: Throwable) {
-                releaseTranscription(handle)
+                finishClip(handle, wavFile)
             }
         }
         task.queue()
@@ -775,6 +779,22 @@ class DictationSession : Disposable {
             activeHandles.remove(handle)
             recomputePhase()
         }
+    }
+
+    /**
+     * Review N16: the single end-point for a clip whose task never ran — cancelled before
+     * start (a project close, the platform dropping a queued task), so [transcribeBody] never
+     * executed and neither its finally nor the failed-hand-off path cleaned up. It gives the
+     * clip back the same way the other exits do: release the in-flight slot exactly once
+     * (review N4) and remove the WAV. Both steps are idempotent ([releaseOnce] / [File.delete]),
+     * so every task hook ([Task.onFinished], [Task.onCancel], [Task.onThrowable]) calls this
+     * unconditionally and a hook that fires after a clip that did run is a no-op.
+     *
+     * Internal so the N16 test can drive the never-ran exit directly, without a task queue.
+     */
+    internal fun finishClip(handle: TranscriptionHandle, wavFile: File) {
+        releaseTranscription(handle)
+        runCatching { wavFile.delete() }
     }
 
     /**
@@ -863,7 +883,8 @@ class DictationSession : Disposable {
                     NotificationType.WARNING,
                     openSettingsAction(project),
                 )
-                wavFile.delete()
+                // The WAV is removed by the finally below (review N16: one deletion point for
+                // every exit of this method).
                 return
             }
             try {
@@ -898,13 +919,16 @@ class DictationSession : Disposable {
                     log.error("transcribe threw", t)
                     notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                 }
-            } finally {
-                wavFile.delete()
             }
         } finally {
             if (locked) {
                 transcriptionLock.unlock()
             }
+            // Review N16: the WAV is a transient artifact — every exit of this method (success,
+            // engine failure, the no-model return, a queued-cancel throw at the top) removes it
+            // here, in one place. A clip whose task never ran is covered by the task hooks via
+            // [finishClip] instead.
+            runCatching { wavFile.delete() }
             // Review N4: release this clip exactly once (idempotent — the task's
             // onCancel/onFinished or a failed hand-off may have taken it first), and recompute
             // the phase from the facts: IDLE only when the last clip is gone and nothing else
