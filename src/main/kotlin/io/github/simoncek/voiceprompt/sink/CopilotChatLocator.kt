@@ -74,7 +74,9 @@ object CopilotChatLocator {
     fun findToolWindow(project: Project?): ToolWindow? = locator().findToolWindow(project)
 
     fun findInput(window: ToolWindow): ChatInput? {
-        log.info("findInput: copilot=${CopilotVersion.describe()}")
+        // Review N20: per-dictation context (this version line, the scan line, every candidate)
+        // is debug; only the outcome lines (SELECTED / NO input found) stay info.
+        log.debug("findInput: copilot=${CopilotVersion.describe()}")
         return locator().findInput(window)
     }
 }
@@ -111,12 +113,15 @@ class LenientChatLocator : ChatLocator {
 
     override fun findInput(window: ToolWindow): ChatInput? {
         val root = window.contentManager.contents.firstNotNullOfOrNull { it.component } ?: return null
-        log.info("findInput: scanning tool window '${window.title}' (id=${window.id})")
+        // Review N20: this runs on every dictation, so the context below (the window, every
+        // candidate component) is debug. The outcome lines further down (SELECTED / NO input
+        // found) stay info — that is the line a user wants when asking where a dictation went.
+        log.debug("findInput: scanning tool window '${window.title}' (id=${window.id})")
 
         val editable = UIUtil.findComponentsOfType(root, JTextComponent::class.java)
             .filter { it.isEditable && it.isEnabled }
         for (c in editable) {
-            log.info(
+            log.debug(
                 "  candidate ${c.javaClass.name} showing=${c.isShowing} visible=${c.isVisible} size=${c.width}x${c.height}",
             )
         }
