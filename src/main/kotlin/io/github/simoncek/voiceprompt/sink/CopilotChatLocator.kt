@@ -18,12 +18,17 @@ sealed class ChatInput {
      * Enter) is only safe on a verified composer: the locator's generic fallback may match *any*
      * editable in the window — a search box, for instance — and sending into that is exactly the
      * risk the review flags (issue #7). Sinks suppress auto-send on unverified inputs.
+     *
+     * Review N18: the flag has no default — the tier that matched must state its confidence
+     * explicitly (the Swing tiers by their Copilot class-name filter, the editor tier by
+     * [LenientChatLocator.identifiesAsCopilot]), so an input constructed without a decision is
+     * a compile error instead of a silent auto-send risk.
      */
     abstract val verified: Boolean
 
     data class Swing(
         val field: JTextComponent,
-        override val verified: Boolean = true,
+        override val verified: Boolean,
     ) : ChatInput() {
         override val component: JComponent = field
     }
@@ -31,7 +36,7 @@ sealed class ChatInput {
     data class Editor(
         val editor: com.intellij.openapi.editor.Editor,
         override val component: JComponent,
-        override val verified: Boolean = true,
+        override val verified: Boolean,
     ) : ChatInput()
 }
 
@@ -125,20 +130,24 @@ class LenientChatLocator : ChatLocator {
 
         copilot.firstOrNull { it.isShowing }?.let {
             log.info("findInput: SELECTED Copilot input ${it.javaClass.name} (showing)")
-            return ChatInput.Swing(it)
+            return ChatInput.Swing(it, verified = true)
         }
         copilot.firstOrNull { it.isVisible }?.let {
             log.info("findInput: SELECTED Copilot input ${it.javaClass.name} (visible, not showing)")
-            return ChatInput.Swing(it)
+            return ChatInput.Swing(it, verified = true)
         }
 
-        // Fallbacks for other plugin versions / layouts.
+        // Fallbacks for other plugin versions / layouts. Review N18: this matches *any*
+        // visible, writable EditorTextField in the window (a search box included), so it is
+        // only verified when the field or an ancestor identifies as Copilot's — otherwise the
+        // sink still injects the text but leaves the Enter to the user (the issue #7 risk).
         val editorField = UIUtil.findComponentsOfType(root, EditorTextField::class.java)
             .firstOrNull { it.isVisible && it.isEnabled && it.editor?.document?.isWritable == true }
         if (editorField != null) {
             val ed = editorField.editor ?: return null
-            log.info("findInput: SELECTED Editor-backed field ${ed.javaClass.name}")
-            return ChatInput.Editor(ed, editorField)
+            val verified = identifiesAsCopilot(editorField)
+            log.info("findInput: SELECTED Editor-backed field ${ed.javaClass.name} (verified=$verified)")
+            return ChatInput.Editor(ed, editorField, verified)
         }
 
         // Unverified tiers: the first editable we can see, whatever it is. The sink will inject
@@ -159,4 +168,23 @@ class LenientChatLocator : ChatLocator {
 
     private fun hasComponent(window: ToolWindow): Boolean =
         window.contentManager.contents.any { it.component != null }
+
+    /**
+     * Review N18: whether [component] or one of its Swing ancestors identifies as part of
+     * Copilot's UI — a class name carrying "copilot" (case-insensitive). The editor tier
+     * matches *any* visible, writable [EditorTextField] in the window, so it may only be
+     * verified when the component tree itself identifies as Copilot's; a composer we cannot
+     * identify is still injected into, just not auto-sent (fail closed — the safe direction:
+     * the user presses Enter manually).
+     *
+     * Internal so the N18 test can pin the decision with plain Swing trees, no platform needed.
+     */
+    internal fun identifiesAsCopilot(component: JComponent): Boolean {
+        var node: JComponent? = component
+        while (node != null) {
+            if (node.javaClass.name.lowercase().contains("copilot")) return true
+            node = node.parent as? JComponent
+        }
+        return false
+    }
 }
