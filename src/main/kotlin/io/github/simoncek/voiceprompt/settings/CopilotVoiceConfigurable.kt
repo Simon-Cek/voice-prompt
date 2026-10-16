@@ -157,7 +157,8 @@ class CopilotVoiceConfigurable : BoundSearchableConfigurable(
                 }
 
                 row(VoiceBundle["settings.input.title"]) {
-                    // The mic test can't run while a dictation recording is in progress.
+                    // The mic test can't run while a dictation recording is in progress (review N14:
+                    // the other direction too — dictation start stops a running test).
                     micTestEnabled.set(!DictationStatus.instance.isCapturing)
                     val mic = comboBox(inputDeviceNames())
                     micComponent = mic.component

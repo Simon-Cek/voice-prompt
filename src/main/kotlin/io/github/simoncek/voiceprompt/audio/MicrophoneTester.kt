@@ -9,6 +9,7 @@ import com.intellij.openapi.util.Disposer
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.LineUnavailableException
 import javax.sound.sampled.TargetDataLine
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MicrophoneTester(
@@ -34,11 +35,15 @@ class MicrophoneTester(
 
     fun start(deviceName: String?) {
         if (DictationStatus.instance.isCapturing) {
+            // Review N14 (test side of the guard): never open a second capture line while
+            // dictation holds the microphone. The other direction — dictation start stopping a
+            // running test — lives in MicrophoneTester.stopAll(), called from DictationSession.
             log.info("Mic test not started: dictation is in progress")
             return
         }
         if (!running.compareAndSet(false, true)) return
         stopping = false
+        active += this
         ApplicationManager.getApplication().executeOnPooledThread { capture(deviceName) }
     }
 
@@ -120,6 +125,7 @@ class MicrophoneTester(
             }
             line = null
             running.set(false)
+            active -= this // review N14: never leave a finished test in the registry
             log.info("Mic test finished: device=${deviceName ?: "system default"} peakLevel=$peak")
             ui {
                 onLevel(0.0)
@@ -146,5 +152,41 @@ class MicrophoneTester(
     // on the EDT would delay. These UI updates must run regardless of modality.
     private fun ui(block: () -> Unit) {
         ApplicationManager.getApplication().invokeLater(Runnable { block() }, ModalityState.any())
+    }
+
+    companion object {
+        private val log = Logger.getInstance(MicrophoneTester::class.java)
+
+        /** Every mic test currently running (or starting). Review N14: the dictation side of the
+         *  mutual-exclusion guard needs to find them, but the tester instances are owned by the
+         *  settings session — so they register here for the lifetime of the capture. */
+        private val active = CopyOnWriteArrayList<MicrophoneTester>()
+
+        /**
+         * Review N14: stops every running mic test and clears them from the registry. Called
+         * when dictation starts — dictation takes the microphone, and the test (a passive
+         * 10 s diagnostic) yields. [start] already refuses while dictation captures, so after
+         * this the two capture paths are mutually exclusive in both directions.
+         *
+         * Safe to call from the EDT ([stop] only sets flags and schedules the line close on a
+         * pooled thread), and a no-op when no test is running.
+         */
+        internal fun stopAll() {
+            for (tester in active) {
+                active -= tester
+                runCatching { tester.stop() }
+                    .onFailure { log.warn("failed to stop the mic test for dictation start", it) }
+            }
+        }
+
+        /** Test seam (review N14): registers [tester] as running, so a test can drive [stopAll]
+         *  without a real microphone. */
+        internal fun registerActiveForTest(tester: MicrophoneTester) {
+            active += tester
+        }
+
+        /** Test seam (review N14): how many tests are registered as running. */
+        internal val activeCountForTest: Int
+            get() = active.size
     }
 }

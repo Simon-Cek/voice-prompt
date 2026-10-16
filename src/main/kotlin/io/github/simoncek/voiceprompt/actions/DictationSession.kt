@@ -19,6 +19,7 @@ import com.intellij.openapi.progress.Task
 import io.github.simoncek.voiceprompt.VoiceBundle
 import io.github.simoncek.voiceprompt.audio.AudioCapture
 import io.github.simoncek.voiceprompt.audio.Beeps
+import io.github.simoncek.voiceprompt.audio.MicrophoneTester
 import io.github.simoncek.voiceprompt.audio.SpeechGate
 import io.github.simoncek.voiceprompt.audio.WavFile
 import io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings
@@ -347,6 +348,12 @@ class DictationSession : Disposable {
             sessionLock.unlock()
         }
         if (!started) return
+        // Review N14: dictation takes the microphone. A mic test still running from the settings
+        // page (the shortcut can fire even over the modal dialog) is stopped now — the test side
+        // already refuses to start while dictation captures (MicrophoneTester.start), so the two
+        // capture paths are mutually exclusive in both directions. Safe on the EDT: stop() only
+        // sets flags and schedules the line close on a pooled thread.
+        MicrophoneTester.stopAll()
         // OPENING — derived: [starting] is true now, and it beats an in-flight TRANSCRIBING.
         recomputePhase()
         // Test seam first (review N2: a test runs start() — and its claim reset — without the
