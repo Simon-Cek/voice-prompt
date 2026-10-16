@@ -28,9 +28,16 @@ fun shortcutKeyCodes(keyCode: Int, modifiers: Int): Set<Int> {
  *    auto-repeat would call start again and the recording would silently restart until the key
  *    is let go.
  *
- * The only transition back to "allowed" is an observed release of the main key, so the decision
- * is correct no matter whether our AWT listener sees the key event before or after the action
- * fires.
+ * The transitions back to "allowed" are an observed release of the main key
+ * ([mainKeyReleased]) and — review N3 — a focus boundary that crossed the *application*
+ * boundary ([rearm]): the key-up of a still-held key then went to another application and
+ * will never be seen here, so the next press we receive is necessarily fresh. In-app window
+ * switches (dialog, tool window) are not such a boundary — the key-up is still delivered
+ * inside the IDE, and re-arming there would let an auto-repeat re-trigger while the key is
+ * still held.
+ *
+ * So the decision is correct no matter whether our AWT listener sees the key event before or
+ * after the action fires.
  */
 class ShortcutTriggerGuard {
     @Volatile
@@ -42,8 +49,21 @@ class ShortcutTriggerGuard {
     }
 
     /**
+     * Focus crossed the application boundary (the IDE lost focus to, or regained focus from,
+     * another application — the window event's opposite window was null). Any key-up of a key
+     * still held went to that application and will never be seen here, so the next press we
+     * receive is necessarily fresh and may be honoured again (review N3).
+     *
+     * Not for in-app window switches (dialog, popup, tool window): there the key-up is still
+     * delivered inside the IDE and will be observed as a release anyway.
+     */
+    fun rearm() {
+        allowed = true
+    }
+
+    /**
      * Returns — and consumes — the permission to act on a shortcut trigger. Triggers without an
-     * intervening [mainKeyReleased] return false.
+     * intervening [mainKeyReleased] or [rearm] return false.
      */
     fun consume(): Boolean {
         if (allowed) {

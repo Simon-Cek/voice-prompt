@@ -183,7 +183,14 @@ class DictationSession : Disposable {
             override fun eventDispatched(event: AWTEvent) {
                 when (event) {
                     is KeyEvent -> if (event.id == KeyEvent.KEY_RELEASED) onKeyReleased(event)
-                    is WindowEvent -> if (event.id == WindowEvent.WINDOW_DEACTIVATED) onWindowDeactivated()
+                    // Review N3: both focus boundaries reach the handlers, which re-arm the
+                    // auto-repeat guard only when the boundary crossed the *application*
+                    // boundary (the opposite window is not in this JVM).
+                    is WindowEvent -> when (event.id) {
+                        WindowEvent.WINDOW_DEACTIVATED -> onWindowDeactivated(event)
+                        WindowEvent.WINDOW_ACTIVATED -> onWindowActivated(event)
+                        else -> Unit
+                    }
                 }
             }
         }
@@ -210,12 +217,38 @@ class DictationSession : Disposable {
         }
     }
 
-    internal fun onWindowDeactivated() {
+    /**
+     * WINDOW_DEACTIVATED.
+     *
+     * Review N3: when [WindowEvent.getOppositeWindow] is null, the boundary crossed the
+     * application — the key-up of a still-held key went to another application and will never
+     * be seen here — so the auto-repeat guard is re-armed and the next fresh press in the IDE
+     * is honoured (before N3 it was swallowed as an "auto-repeat" and the user had to press
+     * twice). An in-app switch (dialog, tool window) keeps the key-up inside the IDE and must
+     * not re-arm, or an auto-repeat could re-trigger while the key is still held: TAP would
+     * toggle start/stop, and HOLD could restart the recording the focus loss just stopped.
+     * Holding the key across an alt-tab round trip can re-arm in both modes — exotic, and
+     * still preferable to swallowing the next real press.
+     *
+     * The stop decision is unchanged (review N1): *any* deactivation stops a live session,
+     * in-app or cross-app.
+     */
+    internal fun onWindowDeactivated(e: WindowEvent) {
+        if (e.oppositeWindow == null) triggerGuard.rearm()
         // Safety net for a lost key-up (e.g. the Alt key activating a menu before its
         // release is seen): in Hold mode we would otherwise wait forever for a release
         // that never comes and stay stuck in the "listening" state. Review N1: also covers
         // a start that is still in progress.
         if (shouldStopOnDeactivate(CopilotVoiceSettings.instance.mode, isRecording, starting.get())) stop()
+    }
+
+    /**
+     * WINDOW_ACTIVATED — the second chance for the review-N3 re-arm when the deactivation
+     * event was missed: the same application-boundary rule as [onWindowDeactivated].
+     * Activation itself never stops a session.
+     */
+    internal fun onWindowActivated(e: WindowEvent) {
+        if (e.oppositeWindow == null) triggerGuard.rearm()
     }
 
     private fun activeProject(): Project? = ProjectManager.getInstance().openProjects.firstOrNull()

@@ -52,6 +52,26 @@ class ShortcutTriggerGuardTest {
         }
         assertTrue("still armed after repeated tap cycles", guard.consume())
     }
+
+    @Test
+    fun `a cross-app focus boundary re-arms the guard for an indefinite number of taps`() {
+        // Review N3: the key-up of a still-held key went to another application and will
+        // never be seen here, so the boundary itself accounts for it.
+        val guard = ShortcutTriggerGuard()
+        repeat(5) {
+            assertTrue(guard.consume()) // press
+            guard.rearm() // focus crossed the application boundary
+        }
+        assertTrue("still armed after repeated focus-boundary cycles", guard.consume())
+    }
+
+    @Test
+    fun `a cross-app focus boundary re-arms without any observed release`() {
+        val guard = ShortcutTriggerGuard()
+        guard.consume() // press — the guard is disarmed and no release will come
+        guard.rearm()
+        assertTrue("the next fresh press must be honoured (review N3)", guard.consume())
+    }
 }
 
 class ShortcutKeyCodesTest {
