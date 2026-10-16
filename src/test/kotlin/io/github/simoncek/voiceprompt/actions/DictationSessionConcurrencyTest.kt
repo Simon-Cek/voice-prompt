@@ -62,16 +62,18 @@ class DictationSessionConcurrencyTest : LightPlatformTestCase() {
         val firstWav = File(dir, "first.wav").apply { writeBytes(byteArrayOf(0x52, 0x49, 0x46, 0x46)) }
         val secondWav = File(dir, "second.wav").apply { writeBytes(byteArrayOf(0x52, 0x49, 0x46, 0x46)) }
 
-        // What finishStop() does before queueing the task: the shared phase goes TRANSCRIBING.
-        DictationStatus.instance.setPhase(DictationPhase.TRANSCRIBING)
+        // What finishStop() does before queueing the task: each clip claims its in-flight
+        // slot, and the phase is derived TRANSCRIBING while at least one clip is still out.
+        val clip1 = s.claimTranscriptionForTest()
+        val clip2 = s.claimTranscriptionForTest()
 
         try {
-            val t1 = Thread { s.transcribeBody(EmptyProgressIndicator(), null, firstWav) }
+            val t1 = Thread { s.transcribeBody(EmptyProgressIndicator(), null, firstWav, clip1) }
             t1.start()
             assertTrue("the first clip should start its inference", firstInference.await(10, TimeUnit.SECONDS))
             // t1 is now inside the faked engine — provably holding the serialisation lock.
             // Only now may the second clip begin, so it must queue behind the first.
-            val t2 = Thread { s.transcribeBody(EmptyProgressIndicator(), null, secondWav) }
+            val t2 = Thread { s.transcribeBody(EmptyProgressIndicator(), null, secondWav, clip2) }
             t2.start()
 
             // Review P5's core: the second clip must NOT run while the first is still in

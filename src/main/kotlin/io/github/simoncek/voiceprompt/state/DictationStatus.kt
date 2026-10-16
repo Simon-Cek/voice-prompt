@@ -38,14 +38,27 @@ class DictationStatus : Disposable {
         tracker.removeListener(listener)
     }
 
-    /** Updates the phase (and, for PROBLEM, a short reason); listeners run on the EDT. */
-    fun setPhase(newPhase: DictationPhase, problem: String? = null) {
-        val invoke = { tracker.setPhase(newPhase, problem) }
+    /**
+     * Applies the phase derived by [compute] — and [compute] is evaluated on the EDT at apply
+     * time, not when the caller asked for the update. A request queued behind a newer one (or
+     * behind a synchronous one) therefore never lands a stale value on top of a newer one: the
+     * last application always reflects the newest facts.
+     *
+     * The caller passes a *reader* of the facts, never a phase computed on its own thread: an
+     * EDT-immediate call can be overtaken by an older queued one, which would then apply the
+     * stale value over the newer one.
+     */
+    fun applyDerivedPhase(compute: () -> DerivedPhase) {
         if (EventQueue.isDispatchThread()) {
-            invoke()
+            applyDerived(compute)
         } else {
-            ApplicationManager.getApplication().invokeLater(invoke)
+            ApplicationManager.getApplication().invokeLater { applyDerived(compute) }
         }
+    }
+
+    private fun applyDerived(compute: () -> DerivedPhase) {
+        val derived = compute()
+        tracker.setPhase(derived.phase, derived.problem)
     }
 
     override fun dispose() {

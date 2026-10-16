@@ -1,10 +1,12 @@
 package io.github.simoncek.voiceprompt.actions
 
 import com.intellij.testFramework.LightPlatformTestCase
+import com.intellij.testFramework.PlatformTestUtil
 import io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings
 import io.github.simoncek.voiceprompt.settings.RecordingMode
 import io.github.simoncek.voiceprompt.state.DictationPhase
 import io.github.simoncek.voiceprompt.state.DictationStatus
+import io.github.simoncek.voiceprompt.state.DerivedPhase
 import java.awt.Frame
 import java.awt.event.KeyEvent
 import org.junit.Assert.assertEquals
@@ -58,7 +60,7 @@ class DictationSessionStopIdempotencyTest : LightPlatformTestCase() {
     fun test_a_phantom_stop_does_not_drop_a_live_transcribing_phase() {
         val status = DictationStatus.instance
         // A previous clip is transcribing: the phase is live and must survive a phantom stop.
-        status.setPhase(DictationPhase.TRANSCRIBING)
+        status.applyDerivedPhase { DerivedPhase(DictationPhase.TRANSCRIBING) }
         var queued: (() -> Unit)? = null
         s.stopWorkDispatcher = { queued = it }
         try {
@@ -68,14 +70,18 @@ class DictationSessionStopIdempotencyTest : LightPlatformTestCase() {
             // Run the captured teardown. Nothing is recording (fresh session), so the review
             // N2 guard must drop it before the stop tone and the phase change.
             queued!!.invoke()
-            assertEquals(
+            // The seed and this assertion both ride the EDT, so pump it: deterministic, and it
+            // is what the status bar would see.
+            PlatformTestUtil.waitWithEventsDispatching(
                 "a phantom stop must not drop a live TRANSCRIBING phase (review N2)",
-                DictationPhase.TRANSCRIBING,
-                status.phase,
+                { status.phase == DictationPhase.TRANSCRIBING },
+                10,
             )
         } finally {
             s.stopWorkDispatcher = null
-            status.setPhase(DictationPhase.IDLE)
+            status.applyDerivedPhase { DerivedPhase(DictationPhase.IDLE) }
+            // Let the cleanup land on the EDT so the next test class starts from IDLE.
+            PlatformTestUtil.waitWithEventsDispatching("cleanup", { status.phase == DictationPhase.IDLE }, 10)
         }
     }
 
