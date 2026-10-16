@@ -45,7 +45,7 @@ object WhisperRuntime {
         }
         val version = readVersion()
         val platformDir = platformDirName()
-        val resolved = ensureRuntime(runtimeTarget(version, platformDir), version, platformDir)
+        val resolved = ensureRuntime(runtimeTarget(version, platformDir), platformDir)
         cached = resolved
         return resolved.cli
     }
@@ -67,37 +67,49 @@ object WhisperRuntime {
         VoicePromptPaths.runtimeDir(version, platformDir)
 
     /**
-     * Ensures [target] holds the extracted, checksum-verified runtime for [version] and returns
-     * the resolved CLI. The full SHA-256 pass runs only when the version marker is missing
-     * (fresh install, wiped dir, or a bumped whisper version) or a file has disappeared;
-     * otherwise a cheap existence check suffices (review P1: don't re-hash the bundled libraries
-     * on every dictation). Thread-safe: concurrent callers are serialized by [LOCK], so the
-     * runtime is never extracted twice at once (review P1).
+     * Ensures [target] holds the extracted, checksum-verified runtime for [platformDir] and
+     * returns the resolved CLI. The full SHA-256 pass runs only when the validation marker is
+     * missing or stale (fresh install, wiped dir, a rebuilt bundle, or a legacy version-string
+     * marker) or a file has disappeared; otherwise a cheap existence check suffices (review P1:
+     * don't re-hash the bundled libraries on every dictation). Thread-safe: concurrent callers
+     * are serialized by [LOCK], so the runtime is never extracted twice at once (review P1).
      */
-    internal fun ensureRuntime(target: Path, version: String, platformDir: String): ResolvedRuntime =
+    internal fun ensureRuntime(target: Path, platformDir: String): ResolvedRuntime =
         synchronized(LOCK) {
             val sums = readSums(platformDir)
             if (sums.isEmpty()) throw RuntimeExtractionException("No bundled whisper files found for $platformDir")
             val marker = target.resolve(VALIDATION_MARKER)
-            if (!markerIsValid(marker, version) || !allPresent(target, sums)) {
+            val markerContent = markerContent(sums)
+            if (!markerIsValid(marker, markerContent) || !allPresent(target, sums)) {
                 if (!allPresentAndValid(target, sums)) {
                     extractUnderLock(target, sums, platformDir)
                 }
-                writeMarker(marker, version)
+                writeMarker(marker, markerContent)
             }
             val cli = target.resolve(if (SystemInfo.isWindows) "whisper-cli.exe" else "whisper-cli")
             if (!Files.isRegularFile(cli)) throw RuntimeExtractionException("whisper-cli is missing after extraction: $cli")
             ResolvedRuntime(cli, target, sums.keys.toSet())
         }
 
-    /** True when a previous run already checksummed every file for this exact [version]. */
-    private fun markerIsValid(marker: Path, version: String): Boolean =
-        runCatching { Files.isRegularFile(marker) && Files.readString(marker).trim() == version }.getOrDefault(false)
+    /**
+     * Review N21: the marker carries a hash of the platform's `whisper/SHA256SUMS` manifest, not
+     * the version string. A rebuild that ships different binaries under the same version is then
+     * detected (a version-keyed marker would call it already validated). A legacy marker holding
+     * the bare version simply fails the check, triggers one full re-validation, and is rewritten.
+     */
+    internal fun markerContent(sums: Map<String, String>): String {
+        val canonical = sums.entries.sortedBy { it.key }.joinToString("\n") { "${it.key}=${it.value}" }
+        return sha256(canonical.encodeToByteArray())
+    }
 
-    private fun writeMarker(marker: Path, version: String) {
+    /** True when a previous run already checksummed every file against the same manifest. */
+    private fun markerIsValid(marker: Path, content: String): Boolean =
+        runCatching { Files.isRegularFile(marker) && Files.readString(marker).trim() == content }.getOrDefault(false)
+
+    private fun writeMarker(marker: Path, content: String) {
         runCatching {
             Files.createDirectories(marker.parent)
-            Files.writeString(marker, version)
+            Files.writeString(marker, content)
         }.onFailure { LOG.warn("could not write the runtime validation marker: $marker", it) }
     }
 
@@ -203,6 +215,12 @@ object WhisperRuntime {
             if (soname != name) symlinks[soname] = name
         }
         return symlinks
+    }
+
+    /** SHA-256 of in-memory bytes (the overload below hashes a file). */
+    private fun sha256(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        return digest.digest(bytes).joinToString("") { "%02x".format(it) }
     }
 
     internal fun sha256(file: Path): String {

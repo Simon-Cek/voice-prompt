@@ -131,7 +131,7 @@ class ModelRow(
             putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
             addActionListener {
                 status = ModelStatus.DOWNLOADING
-                downloads.start(model.id, model.displayName, ModelManager.downloadUrl(model.id)) { success ->
+                downloads.start(model.id, model.displayName) { success ->
                     status = if (success) ModelStatus.INSTALLED else ModelStatus.NOT_DOWNLOADED
                 }
             }

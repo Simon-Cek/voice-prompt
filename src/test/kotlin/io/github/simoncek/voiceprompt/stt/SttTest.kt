@@ -184,7 +184,19 @@ class WhisperRuntimeResolveTest {
     }
 
     private fun resolved(): Path =
-        WhisperRuntime.ensureRuntime(sharedTarget, version, platformDir).cli
+        WhisperRuntime.ensureRuntime(sharedTarget, platformDir).cli
+
+    /** The platform's file → checksum map from the bundled `whisper/SHA256SUMS`. */
+    private fun platformSums(): Map<String, String> =
+        javaClass.classLoader.getResourceAsStream("whisper/SHA256SUMS")!!
+            .bufferedReader().use { reader ->
+                reader.lineSequence()
+                    .map { it.trim().split(Regex("\\s+"), limit = 2) }
+                    .filter { it.size == 2 && it[1].startsWith("$platformDir/") }
+                    .map { it[1].removePrefix("$platformDir/") to it[0].lowercase() }
+                    .toList()
+                    .associate { it }
+            }
 
     /** The first bundled file other than the CLI, with its manifest checksum. */
     private fun sacrificialFile(): Pair<Path, String> {
@@ -203,7 +215,7 @@ class WhisperRuntimeResolveTest {
     }
 
     @Test
-    fun `resolves the runtime and writes the version marker`() {
+    fun `resolves the runtime and writes the manifest marker`() {
         Assume.assumeTrue("supported platform", platformDir != "unsupported")
         val cli = resolved()
         assertTrue("whisper-cli must exist after resolution", Files.isRegularFile(cli))
@@ -212,8 +224,12 @@ class WhisperRuntimeResolveTest {
             assertTrue("whisper-cli must be executable", perms.contains(PosixFilePermission.OWNER_EXECUTE))
         }
         val marker = sharedTarget.resolve(".validated")
-        assertTrue("the version marker must exist after resolution", Files.isRegularFile(marker))
-        assertEquals("the marker must carry the whisper version", version, Files.readString(marker).trim())
+        assertTrue("the validation marker must exist after resolution", Files.isRegularFile(marker))
+        assertEquals(
+            "the marker must carry the hash of the checksum manifest",
+            WhisperRuntime.markerContent(platformSums()),
+            Files.readString(marker).trim(),
+        )
     }
 
     @Test
@@ -244,13 +260,36 @@ class WhisperRuntimeResolveTest {
     }
 
     @Test
-    fun `a stale marker forces a full revalidation`() {
+    fun `a legacy version marker is revalidated and rewritten`() {
         Assume.assumeTrue("supported platform", platformDir != "unsupported")
         resolved()
         val marker = sharedTarget.resolve(".validated")
-        Files.writeString(marker, "bogus-version")
+        // The pre-N21 marker format was the bare whisper version — it must no longer be trusted,
+        // so the marker fast path fails, the runtime is revalidated, and the marker is rewritten.
+        Files.writeString(marker, version)
         resolved()
-        assertEquals("a stale marker must be rewritten with the real version", version, Files.readString(marker).trim())
+        assertEquals(
+            "the legacy version marker must be rewritten with the manifest hash",
+            WhisperRuntime.markerContent(platformSums()),
+            Files.readString(marker).trim(),
+        )
+    }
+
+    @Test
+    fun `a marker from a different bundle is revalidated and rewritten`() {
+        Assume.assumeTrue("supported platform", platformDir != "unsupported")
+        resolved()
+        val marker = sharedTarget.resolve(".validated")
+        // A rebuild that ships different binaries under the same version must be detected: the
+        // manifest hash differs, so the marker must not be accepted.
+        val otherManifest = platformSums().toMutableMap().apply { put("whisper-cli", "deadbeef") }
+        Files.writeString(marker, WhisperRuntime.markerContent(otherManifest))
+        resolved()
+        assertEquals(
+            "a marker for a different manifest must be rewritten",
+            WhisperRuntime.markerContent(platformSums()),
+            Files.readString(marker).trim(),
+        )
     }
 
     @Test
@@ -264,7 +303,7 @@ class WhisperRuntimeResolveTest {
         try {
             val futures = (1..8).map {
                 executor.submit {
-                    results.add(WhisperRuntime.ensureRuntime(dir, version, platformDir).cli)
+                    results.add(WhisperRuntime.ensureRuntime(dir, platformDir).cli)
                 }
             }
             futures.forEach { future ->
@@ -374,6 +413,25 @@ class ModelManagerTest {
             abc123  ggml-base.en.bin
         """.trimIndent()
         assertEquals("abc123", ModelManager.parseSha256Sums(sums, "ggml-base.en.bin"))
+    }
+
+    @Test
+    fun `every offered model has a verifiable checksum in the bundled manifest`() {
+        for (model in ModelManager.AVAILABLE_MODELS) {
+            val expected = ModelManager.expectedSha256(model.id)
+            assertNotNull(
+                "models/SHA256SUMS must list ${model.id} — without it the download fails closed",
+                expected,
+            )
+            assertEquals("a SHA-256 checksum is 64 hex characters", 64, expected!!.length)
+        }
+    }
+
+    @Test
+    fun `the download url is pinned to a commit, not a moving branch`() {
+        val url = ModelManager.downloadUrl("small")
+        assertTrue("the URL must pin the capture commit", url.contains(ModelManager.MODELS_REPO_COMMIT))
+        assertFalse("resolve/main tracks a moving branch (review N21)", url.contains("/resolve/main/"))
     }
 }
 
@@ -496,11 +554,6 @@ class WhisperServerIntegrationTest {
             SystemInfo.isLinux -> "linux-x64"
             else -> "unsupported"
         }
-
-        private val version: String =
-            javaClass.classLoader.getResource("whisper/WHISPER_VERSION.txt")
-                ?.readText()?.trim()
-                ?: error("whisper/WHISPER_VERSION.txt is missing from the test classpath")
     }
 
     private var workDir: Path? = null
@@ -517,7 +570,7 @@ class WhisperServerIntegrationTest {
         val dir = Files.createTempDirectory("whisper-server-test")
         dir.toFile().deleteOnExit()
         workDir = dir
-        val runtime = WhisperRuntime.ensureRuntime(dir, version, platformDir)
+        val runtime = WhisperRuntime.ensureRuntime(dir, platformDir)
         val candidate = runtime.cli.parent.resolve(
             if (SystemInfo.isWindows) "whisper-server.exe" else "whisper-server",
         )
