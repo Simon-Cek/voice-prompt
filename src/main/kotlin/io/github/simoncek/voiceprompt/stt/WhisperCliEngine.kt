@@ -16,7 +16,7 @@ class WhisperCliEngine {
 
     private val log = Logger.getInstance(WhisperCliEngine::class.java)
 
-    class TranscriptionException(message: String, cause: Throwable? = null) : IOException(message, cause)
+    class TranscriptionException(message: String, cause: Throwable? = null, val httpStatus: Int? = null) : IOException(message, cause)
 
     /**
      * Transcribes [wavFile] with a one-shot whisper-cli run.
@@ -26,6 +26,12 @@ class WhisperCliEngine {
      * on CPU. A non-zero exit with the GPU on therefore retries the utterance once with
      * `--no-gpu`; a timeout or a user cancellation does not retry (the second run would just
      * time out / cancel again).
+     *
+     * Review N9: the retry only CONFIRMS the failure — [GpuHealth.noteFailure] is called only
+     * when the CPU run succeeds, so a model that fails on both backends is not blacklisted (no
+     * loop, no hiding a real error). And the blacklist applies BEFORE the first attempt, so a
+     * confirmed GPU failure means the next call starts on the CPU directly — important on
+     * Windows, where only the CLI path runs.
      */
     fun transcribe(
         wavFile: File,
@@ -36,7 +42,14 @@ class WhisperCliEngine {
         threads: Int = 0,
         /** The task's indicator: its Cancel button aborts the run and kills the process. Null for unattended calls. */
         indicator: ProgressIndicator? = null,
-    ): String = runOnce(WhisperRuntime.cliPath(), wavFile, model, language, timeoutMs, useGpu, threads, indicator)
+        /** Review N9: the processing-settings key scoping the GPU blacklist (see [GpuHealth]); null derives one. */
+        processingKey: String? = null,
+    ): String {
+        val key = processingKey ?: GpuHealth.processingKey(if (useGpu) "GPU" else "CPU", threads)
+        // Review N9: a confirmed GPU failure for this model goes straight to the CPU.
+        val firstGpu = useGpu && !GpuHealth.isBlacklisted(model, key)
+        return runOnce(WhisperRuntime.cliPath(), wavFile, model, language, timeoutMs, firstGpu, threads, indicator, key)
+    }
 
     /**
      * Test seam for [transcribe]: the same path against an explicit CLI binary, so the review-P3
@@ -51,9 +64,19 @@ class WhisperCliEngine {
         useGpu: Boolean,
         threads: Int,
         indicator: ProgressIndicator?,
-    ): String = runOnce(cli, wavFile, model, language, timeoutMs, useGpu, threads, indicator)
+        /** Review N9: the processing-settings key scoping the GPU blacklist (see [GpuHealth]). */
+        processingKey: String? = null,
+    ): String {
+        val key = processingKey ?: GpuHealth.processingKey(if (useGpu) "GPU" else "CPU", threads)
+        val firstGpu = useGpu && !GpuHealth.isBlacklisted(model, key)
+        return runOnce(cli, wavFile, model, language, timeoutMs, firstGpu, threads, indicator, key)
+    }
 
-    /** One whisper-cli invocation; the review-P3 GPU→CPU retry lives at its non-zero-exit point. */
+    /**
+     * One whisper-cli invocation; the review-P3 GPU→CPU retry lives at its non-zero-exit point.
+     * [useGpu] is the BACKEND OF THIS ATTEMPT: a failed GPU attempt retries once on the CPU, and
+     * a successful CPU retry confirms the failure as a GPU problem (review N9).
+     */
     private fun runOnce(
         cli: Path,
         wavFile: File,
@@ -63,6 +86,7 @@ class WhisperCliEngine {
         useGpu: Boolean,
         threads: Int,
         indicator: ProgressIndicator?,
+        processingKey: String,
     ): String {
         val commandLine = GeneralCommandLine(buildArguments(cli, wavFile, model, language, useGpu, threads))
             .withWorkDirectory(WhisperRuntime.runtimeDir(cli))
@@ -103,10 +127,16 @@ class WhisperCliEngine {
                 if (useGpu) {
                     // Review P3: the GPU run failed (weak iGPU / flaky driver); the CPU run of the
                     // same utterance may still work. One retry, then a combined error below.
+                    // Review N9 #1: the retry CONFIRMS the failure — the GPU is blacklisted only
+                    // if the CPU run succeeds. If the CPU fails too, it is not a GPU problem: no
+                    // blacklist, the combined error goes up, and nothing loops.
                     log.warn("whisper-cli exited $exitCode on the GPU; retrying once with --no-gpu")
                     return try {
-                        runOnce(cli, wavFile, model, language, timeoutMs, false, threads, indicator)
+                        val text = runOnce(cli, wavFile, model, language, timeoutMs, false, threads, indicator, processingKey)
+                        if (GpuHealth.noteFailure(model, processingKey)) notifyGpuBlacklisted(model)
+                        text
                     } catch (cpuFailure: TranscriptionException) {
+                        log.warn("whisper-cli also exited non-zero on the CPU (${cpuFailure.message}); no GPU blacklist")
                         throw TranscriptionException(
                             "whisper-cli failed on the GPU (exit $exitCode) and again on the CPU: ${cpuFailure.message}",
                             cpuFailure,

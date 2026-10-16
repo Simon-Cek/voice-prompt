@@ -35,6 +35,20 @@ import java.util.concurrent.TimeUnit
  * server (`--no-gpu`) before the CLI fallback — the same GPU→CPU safety net as
  * [WhisperCliEngine.transcribe].
  *
+ * Review N9 sharpens that net:
+ *  - the CPU retry CONFIRMS the failure — the model is blacklisted for the GPU ([GpuHealth])
+ *    only when the CPU run SUCCEEDS. If the CPU fails too, nothing is remembered and the error
+ *    goes up (no loop, no hidden real error);
+ *  - the blacklist applies from the NEXT call onwards: a blacklisted model starts directly on
+ *    the CPU key, so the failure-and-restart dance happens once, not on every utterance;
+ *  - failures that are NOT the GPU's fault keep the warm server and do not retry: an HTTP 4xx
+ *    (the server rejected this request), a timeout (the model is slow, not dead), and a user
+ *    cancel (the in-flight inference dies with the closed connection — the real server polls
+ *    for it);
+ *  - a GPU-keyed server that DIES during startup (not a timeout, not a cancel) tries the CPU
+ *    key once and blacklists if it comes up; that GPU attempt sets no startup backoff (only the
+ *    CPU attempt's failure does).
+ *
  * Review N8: the start — spawning plus the /health wait (up to [STARTUP_TIMEOUT_MS]) — runs
  * OUTSIDE the lock. [shutdown], the idle reaper and a concurrent stop therefore kill the
  * in-flight process instead of blocking on it; the wait honours the task's Cancel button; and
@@ -59,10 +73,21 @@ object WhisperServerEngine {
      */
     private class InferenceTimeoutException(message: String) : IOException(message)
 
+    /**
+     * Review N9 #2: a GPU-keyed server DIED during startup (not a timeout, not a cancel) — a
+     * GPU-failure candidate. Unlike a plain startup failure it sets no startup backoff: the
+     * caller immediately tries the CPU key, and only a CPU-side failure is a real startup
+     * failure worth backing off from.
+     */
+    private class GpuStartupDeath(val logFile: File) : Exception("whisper-server died on the GPU during startup")
+
     /** What a running server was started with; a change in any of it means a restart. */
     private data class ServerKey(val model: Path, val useGpu: Boolean, val threads: Int)
 
     private class ServerHandle(val process: java.lang.Process, val port: Int, val key: ServerKey, val logFile: File)
+
+    /** Review N9 #2: the /health wait outcome — ready, or the process DIED during startup. */
+    private class StartupResult(val process: java.lang.Process?, val died: Boolean)
 
     /** Review N8: a spawn-in-progress (see [starting]); the caller that spawned owns [process]. */
     private class Starting(val key: ServerKey) {
@@ -129,11 +154,17 @@ object WhisperServerEngine {
         timeoutMs: Long = WhisperCliEngine.DEFAULT_TIMEOUT_MS,
         useGpu: Boolean = false,
         threads: Int = 0,
-        /** The task's indicator: its Cancel button aborts the run and stops the server. Null for unattended calls. */
+        /**
+         * The task's indicator: its Cancel button aborts the run; the server stays warm
+         * (review N9 — the in-flight inference dies with the closed connection). Null for
+         * unattended calls.
+         */
         indicator: ProgressIndicator? = null,
+        /** Review N9: the processing-settings key scoping the GPU blacklist (see [GpuHealth]); null derives one. */
+        processingKey: String? = null,
     ): String = transcribeInternal(
         wavFile, model, language, timeoutMs, useGpu, threads, indicator,
-        serverBinary(), defaultLogFile(),
+        serverBinary(), defaultLogFile(), processingKey = processingKey,
     )
 
     /**
@@ -154,54 +185,74 @@ object WhisperServerEngine {
         serverBinary: Path?,
         logFile: File,
         allowFallback: Boolean = true,
+        /** Review N9: the processing-settings key scoping the GPU blacklist (see [GpuHealth]); null derives one. */
+        processingKey: String? = null,
     ): String {
-        val key = ServerKey(model, useGpu, threads)
+        val key = processingKey ?: GpuHealth.processingKey(if (useGpu) "GPU" else "CPU", threads)
+        // Review N9: a confirmed GPU failure for this model goes straight to the CPU — the
+        // fail-and-restart dance happens once, not on every utterance.
+        val gpu = useGpu && !GpuHealth.isBlacklisted(model, key)
+        val serverKey = ServerKey(model, gpu, threads)
         if (serverBinary != null && !inStartupBackoff()) {
-            val active = ensureRunning(key, serverBinary, logFile, indicator)
+            val active = try {
+                ensureRunning(serverKey, serverBinary, logFile, indicator)
+            } catch (e: GpuStartupDeath) {
+                // Review N9 #2: a GPU-keyed server DIED during startup (not a timeout, not a
+                // cancel). Try the CPU key once; if it comes up, the GPU failure is confirmed
+                // for this model. The GPU attempt itself set no startup backoff.
+                log.warn("whisper-server died on the GPU during startup (log: ${e.logFile}); trying the CPU key once")
+                val cpu = try {
+                    ensureRunning(ServerKey(model, false, threads), serverBinary, logFile, indicator)
+                } catch (c: ProcessCanceledException) {
+                    throw c
+                }
+                if (cpu != null) {
+                    if (GpuHealth.noteFailure(model, key)) notifyGpuBlacklisted(model)
+                    cpu
+                } else {
+                    // The CPU startup failed too (it marked its own backoff): the normal
+                    // did-not-start handling below (ISE or CLI fallback) applies.
+                    null
+                }
+            }
             if (active != null) {
                 try {
                     val raw = request(active, wavFile, language, timeoutMs, indicator)
                     lastUsed = System.currentTimeMillis()
                     return WhisperCliEngine().normalizeTranscript(raw)
                 } catch (e: ProcessCanceledException) {
-                    // Cancel button: kill the server so the in-flight inference dies with it.
-                    stopCurrent()
+                    // Review N9: cancel — keep the warm server. The in-flight inference dies with
+                    // the closed connection (the real server polls for it).
                     throw e
                 } catch (e: InferenceTimeoutException) {
-                    stopCurrent()
+                    // Review N9: a slow inference — the server is fine; keep it warm for the next
+                    // utterance. (Falling back to the CLI would just re-run the same inference.)
                     throw e
                 } catch (t: Throwable) {
-                    stopCurrent()
-                    // Review P3: the GPU-backed server failed on this machine (weak iGPU, flaky
-                    // driver). Restart it on CPU and retry this utterance once before giving up
-                    // on the server — the CLI fallback would re-load the model and lose the warm
-                    // process. Timeouts and cancellations are handled above and do not retry.
-                    if (useGpu) {
-                        log.warn("whisper-server request failed on the GPU (${t.message}); retrying once with --no-gpu")
-                        val cpuActive = ensureRunning(ServerKey(model, false, threads), serverBinary, logFile, indicator)
-                        if (cpuActive != null) {
-                            try {
-                                val raw = request(cpuActive, wavFile, language, timeoutMs, indicator)
-                                lastUsed = System.currentTimeMillis()
-                                return WhisperCliEngine().normalizeTranscript(raw)
-                            } catch (e: ProcessCanceledException) {
-                                stopCurrent()
-                                throw e
-                            } catch (e: InferenceTimeoutException) {
-                                stopCurrent()
-                                throw e
-                            } catch (cpuFailure: Throwable) {
-                                stopCurrent()
-                                log.warn("whisper-server request also failed on CPU (${cpuFailure.message}); giving up on the server")
-                            }
+                    if (isRequestProblem(t)) {
+                        // Review N9: the server rejected THIS request (HTTP 4xx) — a request
+                        // problem, not a GPU failure. Keep the warm server; do not retry.
+                        if (!allowFallback) {
+                            log.warn("whisper-server rejected the request; rethrowing (fallback disabled)", t)
+                            throw t
                         }
+                        log.warn("whisper-server rejected the request (${t.message}); falling back to whisper-cli")
+                    } else {
+                        // Review N9 #1: a GPU-failure candidate (HTTP 5xx, a dead process, an
+                        // I/O error). Confirm it: retry the utterance once on the CPU key, and
+                        // remember the GPU failure only if the CPU run succeeds.
+                        val cpuText = retryOnCpuIfGpuServer(
+                            active, t, model, threads, key, serverBinary, logFile, indicator,
+                            wavFile, language, timeoutMs,
+                        )
+                        if (cpuText != null) return cpuText
+                        if (!allowFallback) {
+                            log.warn("whisper-server request failed; rethrowing (fallback disabled)", t)
+                            throw t
+                        }
+                        // Server died mid-request, bad response, …: this utterance still has to work.
+                        log.warn("whisper-server request failed; falling back to whisper-cli", t)
                     }
-                    if (!allowFallback) {
-                        log.warn("whisper-server request failed; rethrowing (fallback disabled)", t)
-                        throw t
-                    }
-                    // Server died mid-request, bad response, …: this utterance still has to work.
-                    log.warn("whisper-server request failed; falling back to whisper-cli", t)
                 }
             } else if (!allowFallback) {
                 throw IllegalStateException("whisper-server did not start (log: ${logFile.absolutePath})")
@@ -209,7 +260,77 @@ object WhisperServerEngine {
         } else if (!allowFallback) {
             throw IllegalStateException("no whisper-server available for this platform (log: ${logFile.absolutePath})")
         }
-        return WhisperCliEngine().transcribe(wavFile, model, language, timeoutMs, useGpu, threads, indicator)
+        return WhisperCliEngine().transcribe(wavFile, model, language, timeoutMs, useGpu, threads, indicator, key)
+    }
+
+    /** Review N9: HTTP 4xx — the server rejected this request; it is not a GPU failure. */
+    private fun isRequestProblem(t: Throwable): Boolean =
+        t is WhisperCliEngine.TranscriptionException && (t.httpStatus ?: 0) in 400..499
+
+    /**
+     * Review N9 #1: the request failed on a GPU-keyed server (HTTP 5xx, a dead process, an I/O
+     * error). Confirm it is a GPU problem: retry the utterance once on the CPU key, and remember
+     * the GPU failure ([GpuHealth]) only if the CPU run SUCCEEDS.
+     *
+     * Returns the CPU's transcript, or null when there was no GPU to blame (a CPU-keyed server)
+     * or the CPU path also failed — the caller then reports [failure] / falls back.
+     */
+    private fun retryOnCpuIfGpuServer(
+        failed: ServerHandle,
+        failure: Throwable,
+        model: Path,
+        threads: Int,
+        processingKey: String,
+        serverBinary: Path,
+        logFile: File,
+        indicator: ProgressIndicator?,
+        wavFile: File,
+        language: String,
+        timeoutMs: Long,
+    ): String? {
+        if (!failed.key.useGpu) {
+            // A CPU-keyed server failed: there is no GPU to blame — no retry, no blacklist.
+            // A dead process clears itself; a live one stays warm for the next request.
+            if (!failed.process.isAlive) stopCurrent()
+            log.warn("whisper-server request failed on the CPU (${failure.message})")
+            return null
+        }
+        // Review N9 #1: don't classify by the exception type alone — for an I/O error, verify
+        // against the process (dead? exit code?).
+        val processState = if (failed.process.isAlive) {
+            "the server process is still alive"
+        } else {
+            "the server process is dead (exit code ${runCatching { failed.process.exitValue() }.getOrNull() ?: "unknown"})"
+        }
+        log.warn(
+            "whisper-server request failed on the GPU; $processState; error: ${failure.message}; " +
+                "retrying once with --no-gpu",
+        )
+        stopCurrent()
+        val cpuActive = try {
+            ensureRunning(ServerKey(model, false, threads), serverBinary, logFile, indicator)
+        } catch (c: ProcessCanceledException) {
+            throw c
+        }
+        if (cpuActive == null) {
+            // The CPU startup failed (it marked its own backoff): no confirmed GPU failure.
+            return null
+        }
+        return try {
+            val raw = request(cpuActive, wavFile, language, timeoutMs, indicator)
+            lastUsed = System.currentTimeMillis()
+            // Review N9 #1: the CPU run succeeded — the failure is confirmed as a GPU problem.
+            if (GpuHealth.noteFailure(model, processingKey)) notifyGpuBlacklisted(model)
+            WhisperCliEngine().normalizeTranscript(raw)
+        } catch (c: ProcessCanceledException) {
+            throw c
+        } catch (c: InferenceTimeoutException) {
+            throw c
+        } catch (cpuFailure: Throwable) {
+            // Review N9 #1: the CPU failed too — it is not a GPU problem; no blacklist, no loop.
+            log.warn("whisper-server request also failed on the CPU (${cpuFailure.message}); no GPU blacklist")
+            null
+        }
     }
 
     /**
@@ -267,12 +388,15 @@ object WhisperServerEngine {
         claim.foreign?.process?.let { it.destroyForcibly() }
 
         var ready: java.lang.Process? = null
+        var died = false
         var cancelled: ProcessCanceledException? = null
         try {
             starter.port = freePort()
             val process = startProcess(serverBinary, key, starter.port, logFile)
             starter.process = process
-            ready = waitForHealth(starter.port, process, logFile, indicator, startupTimeoutMs)
+            val result = waitForHealth(starter.port, process, logFile, indicator, startupTimeoutMs)
+            ready = result.process
+            died = result.died
         } catch (e: ProcessCanceledException) {
             // Review N8 #2: a cancel is NOT a startup failure — no backoff. [resolveStart]
             // clears the claim and rethrows the cancel.
@@ -280,7 +404,7 @@ object WhisperServerEngine {
         } catch (t: Throwable) {
             log.warn("failed to start whisper-server at $serverBinary", t)
         }
-        return resolveStart(starter, ready, cancelled, key, logFile)
+        return resolveStart(starter, ready, died, cancelled, key, logFile)
     }
 
     /**
@@ -322,10 +446,11 @@ object WhisperServerEngine {
     }
 
     /**
-     * Waits until the server answers `/health`. Returns the ready process, or null when it dies
-     * during startup (model load failure, bad binary, …) or the wait times out — both cases leave
-     * the process stopped. [startupTimeoutMs] covers a large model loading on a slow machine; the
-     * first dictation of a session pays this once.
+     * Waits until the server answers `/health`. Returns [StartupResult]: the ready process, or
+     * how the start failed — the process DIED during startup ([StartupResult.died], model load
+     * failure, bad binary, …) or the wait timed out (the process was killed by the wait).
+     * [startupTimeoutMs] covers a large model loading on a slow machine; the first dictation of
+     * a session pays this once.
      *
      * A cancel from [indicator] kills the process and rethrows [ProcessCanceledException] — the
      * Cancel button must work during the wait (review N8).
@@ -336,7 +461,7 @@ object WhisperServerEngine {
         logFile: File,
         indicator: ProgressIndicator?,
         timeoutMs: Long,
-    ): java.lang.Process? {
+    ): StartupResult {
         val deadline = System.currentTimeMillis() + timeoutMs
         try {
             while (System.currentTimeMillis() < deadline) {
@@ -344,14 +469,16 @@ object WhisperServerEngine {
                 if (!process.isAlive) {
                     log.warn("whisper-server exited during startup (log: ${logFile.absolutePath})")
                     logTail(logFile)
-                    return null
+                    return StartupResult(process, died = true)
                 }
-                if (isReady(port)) return process
+                if (isReady(port)) return StartupResult(process, died = false)
                 Thread.sleep(250)
             }
             log.warn("whisper-server not ready after ${timeoutMs} ms (log: ${logFile.absolutePath})")
             process.destroyForcibly()
-            return null
+            // died=false: the process was alive until the wait killed it — a timeout, not a
+            // startup death (review N9 #2: only a real death on the GPU key skips the backoff).
+            return StartupResult(process, died = false)
         } catch (e: ProcessCanceledException) {
             process.destroyForcibly()
             throw e
@@ -361,11 +488,14 @@ object WhisperServerEngine {
     /**
      * The single resolution point of a start (review N8 #6): the claim is always cleared or
      * published, an unpublished process is always killed, and the backoff is marked only on a
-     * REAL failure — a cancel or a shutdown never sets it (review N8 #2).
+     * REAL failure — a cancel or a shutdown never sets it (review N8 #2), and neither does a
+     * GPU-keyed startup DEATH: that is a GPU-failure candidate the caller may retry on the CPU
+     * key (review N9 #2), not a general startup failure.
      */
     private fun resolveStart(
         starter: Starting,
         ready: java.lang.Process?,
+        died: Boolean,
         cancelled: ProcessCanceledException?,
         key: ServerKey,
         logFile: File,
@@ -379,8 +509,14 @@ object WhisperServerEngine {
                 cancelled != null -> "cancelled"
                 !mine || shuttingDown -> "aborted"
                 ready == null -> {
-                    markStartupFailure()
-                    "failed"
+                    if (key.useGpu && died) {
+                        // Review N9 #2: a GPU-keyed server died at startup — no backoff (the
+                        // caller tries the CPU key); surface it for that decision.
+                        "gpu-died"
+                    } else {
+                        markStartupFailure()
+                        "failed"
+                    }
                 }
                 else -> {
                     published = ServerHandle(ready, starter.port, key, logFile)
@@ -405,6 +541,11 @@ object WhisperServerEngine {
                 // we spawned and surface a cancellation.
                 ready?.let { if (it.isAlive) it.destroyForcibly() }
                 throw ProcessCanceledException()
+            }
+            "gpu-died" -> {
+                // Review N9 #2: it died (already stopped by waitForHealth); the caller decides
+                // the CPU-key retry. No backoff was set.
+                throw GpuStartupDeath(logFile)
             }
             else -> {
                 // "failed": it died during startup or the wait timed out (both already stopped by
@@ -438,8 +579,13 @@ object WhisperServerEngine {
         }
         val response = future.get()
         if (response.statusCode() != 200) {
+            // Review N9: carry the status so the caller can tell a rejected request (4xx, keep
+            // the warm server) from a failed inference (5xx, a GPU-failure candidate).
+            // The bundled whisper-server reports a failed inference as HTTP 500 with a JSON
+            // error body (verified against v1.9.5 server.cpp), never as 200 + error text.
             throw WhisperCliEngine.TranscriptionException(
                 "whisper-server returned HTTP ${response.statusCode()}: ${response.body().take(200)}",
+                httpStatus = response.statusCode(),
             )
         }
         log.info("whisper-server inferred ${response.body().length} chars")

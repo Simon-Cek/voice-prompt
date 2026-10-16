@@ -27,6 +27,7 @@ import io.github.simoncek.voiceprompt.sink.ChatSinkChain
 import io.github.simoncek.voiceprompt.sink.CopilotVersion
 import io.github.simoncek.voiceprompt.state.DictationStatus
 import io.github.simoncek.voiceprompt.state.derivePhase
+import io.github.simoncek.voiceprompt.stt.GpuHealth
 import io.github.simoncek.voiceprompt.stt.ModelManager
 import io.github.simoncek.voiceprompt.stt.WhisperCliEngine
 import io.github.simoncek.voiceprompt.stt.WhisperLanguage
@@ -782,11 +783,18 @@ class DictationSession : Disposable {
             try {
                 log.info("transcribe starting: model=$model wav=${wavFile.absolutePath}")
                 val language = if (ModelManager.isEnglishOnly(activeModelId)) WhisperLanguage.ENGLISH.code else CopilotVoiceSettings.instance.language
+                // Review N9: the confirmed-GPU-failure blacklist is scoped to the current
+                // Processing settings — the user moving the Processing dropdown or the thread
+                // count is a deliberate "try the GPU again", so [GpuHealth.sync] clears it on a
+                // change. The key also scopes the blacklist checks in the engines.
+                val processingKey = GpuHealth.processingKey(CopilotVoiceSettings.instance.processingMode.name, threads())
+                GpuHealth.sync(processingKey)
                 val text = engineTranscribe?.invoke(wavFile, model, language, indicator)
                     ?: WhisperServerEngine.transcribe(
                         wavFile, model,
                         language = language, useGpu = useGpu(), threads = threads(),
                         indicator = indicator,
+                        processingKey = processingKey,
                     )
                 log.info("transcribe done: len=${text.length} blank=${text.isBlank()}")
                 if (text.isBlank()) {

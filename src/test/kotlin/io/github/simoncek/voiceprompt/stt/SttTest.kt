@@ -613,10 +613,14 @@ class WhisperCliGpuRetryTest {
         w.writeBytes(byteArrayOf(1, 2, 3, 4))
         w.deleteOnExit()
         wav = w
+        // N9: the "GPU fails, CPU succeeds" test below confirms a failure and blacklists the
+        // model — the state is process-wide, so clear it around every test.
+        GpuHealth.clearForTest()
     }
 
     @After
     fun tearDown() {
+        GpuHealth.clearForTest()
         dir?.toFile()?.deleteRecursively()
     }
 
@@ -731,12 +735,16 @@ class WhisperServerGpuRetryTest {
         wav = w
         // N8: shutdown() is sticky (shuttingDown) — reset the engine state for each test.
         WhisperServerEngine.resetForTest()
+        // N9: the "GPU fails, CPU succeeds" test below confirms a failure and blacklists the
+        // model — the state is process-wide, so clear it around every test.
+        GpuHealth.clearForTest()
     }
 
     @After
     fun tearDown() {
         WhisperServerEngine.shutdown()
         WhisperServerEngine.resetForTest()
+        GpuHealth.clearForTest()
         dir?.toFile()?.deleteRecursively()
     }
 
