@@ -108,6 +108,22 @@ class DictationSession : Disposable {
     private val starting = AtomicBoolean(false)
     /** Set by [stop] while a start is still in progress, so the start aborts before opening the mic. */
     @Volatile private var startCancelled = false
+    /**
+     * Review N2: at most one stop per session. Claimed by the first [stop] and reset by the next
+     * [start], so a duplicate stop (two keys of the chord released within milliseconds, or a
+     * release coinciding with a focus loss or a status-bar click) is dropped instead of running a
+     * second [finishStop] — that would play the stop tone again and could drop a live
+     * TRANSCRIBING to IDLE.
+     */
+    private val stopClaimed = AtomicBoolean(false)
+    /**
+     * Review N2: makes the claim/reset sequence atomic — [start] claims [starting] and resets
+     * [stopClaimed] together, [stop] claims [stopClaimed] and decides [startCancelled] together.
+     * Without it a stop() landing between start()'s claim and its reset of [stopClaimed] would be
+     * silently dropped. No blocking work is done inside the lock; [finishStop] is dispatched only
+     * after it is released.
+     */
+    private val sessionLock = ReentrantLock()
     /** Bounded wait for the start tone before the mic opens (review #10 suggests 400 ms). */
     private val START_BEEP_WAIT_MS = 400L
     /**
@@ -211,9 +227,30 @@ class DictationSession : Disposable {
         // into the capture, and the headset profile switch triggered by the mic-open swallows a
         // late tone), and both steps block — so this must not run on the EDT. A second press
         // while the first is still opening is ignored; a release in between cancels via [stop].
-        if (!starting.compareAndSet(false, true)) return
-        startCancelled = false
-        ApplicationManager.getApplication().executeOnPooledThread {
+        // Review N2: claim the start and reset the stop claim atomically, so a stop() (a quick
+        // release) cannot land between the two and be silently dropped. No blocking work in the
+        // lock; the start sequence is dispatched after it is released.
+        var started = false
+        sessionLock.lock()
+        try {
+            if (starting.compareAndSet(false, true)) {
+                startCancelled = false
+                stopClaimed.set(false) // a new session may be stopped once
+                started = true
+            }
+        } finally {
+            sessionLock.unlock()
+        }
+        if (!started) return
+        // Test seam first (review N2: a test runs start() — and its claim reset — without the
+        // beep + mic open), else the production pooled-thread path.
+        startWorkDispatcher?.invoke {
+            try {
+                startInternal(project)
+            } finally {
+                starting.set(false)
+            }
+        } ?: ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 startInternal(project)
             } finally {
@@ -310,17 +347,31 @@ class DictationSession : Disposable {
      * and [notify] marshal themselves).
      */
     fun stop(project: Project? = null) {
+        // Review N2: claim the stop atomically together with the "is a start in progress"
+        // decision, so a duplicate is dropped and an in-progress start is cancelled in one
+        // atomic step. No blocking work in the lock; the teardown is dispatched after it.
+        var claimed = false
+        var cancelling = false
+        sessionLock.lock()
+        try {
+            if (stopClaimed.compareAndSet(false, true)) {
+                claimed = true
+                cancelling = starting.get()
+                if (cancelling) {
+                    // A start sequence is still opening the mic (issue #10): cancel it, so it
+                    // does not start a recording this stop is already tearing down.
+                    startCancelled = true
+                }
+            }
+        } finally {
+            sessionLock.unlock()
+        }
+        if (!claimed) return
         // Prefer the project the recording started in: the stop triggers (key release, max
         // duration) carry no event project of their own, and the first-opened project would
         // be the wrong target in a multi-project window.
         val target = recordingProject ?: project
         recordingProject = null
-        val cancelling = starting.get()
-        if (cancelling) {
-            // A start sequence is still opening the mic (issue #10): cancel it, so it does not
-            // start a recording this stop is already tearing down.
-            startCancelled = true
-        }
         // Review #11, item 4 (opt-in): keep the line open-but-stopped for the next start so it
         // is instant. When this stop is cancelling an in-flight start, keep it off — a line the
         // user just aborted should not be held open.
@@ -338,6 +389,14 @@ class DictationSession : Disposable {
      * pooled thread via [stop]; [stopWorkDispatcher] routes it elsewhere in tests.
      */
     private fun finishStop(target: Project?, keepSeconds: Long) {
+        // Review N2: a stop that finds nothing recording (a duplicate that slipped past
+        // stopClaimed, or a start that was cancelled before it opened the mic) must not play the
+        // stop tone or touch the phase — that would be a second beep and could hide a live
+        // TRANSCRIBING. A genuine stop always sees the capture still recording here.
+        if (!capture.isRecording()) {
+            log.debug("finishStop dropped: the capture is not recording (a duplicate stop or a cancelled start)")
+            return
+        }
         val samples = capture.stop(keepSeconds)
         // Stop tone only AFTER the capture line is closed (issue #10): before, it could bleed
         // into the tail of the captured clip.
@@ -390,6 +449,19 @@ class DictationSession : Disposable {
     internal fun setStartingForTest(value: Boolean) {
         starting.set(value)
     }
+
+    /**
+     * Test seam for [start] (review N2): routes the queued start work to a custom dispatcher so
+     * a test can run [start] — and its release of the stop claim — without the beep + mic open.
+     * Null (the default) = the production pooled-thread path.
+     */
+    internal var startWorkDispatcher: ((() -> Unit) -> Unit)? = null
+
+    /**
+     * Test seam (review N2): read the "start cancelled" flag, so a test can prove a stop() that
+     * landed while a start was in progress set it — without running [startInternal].
+     */
+    internal fun isStartCancelledForTest(): Boolean = startCancelled
 
     private fun transcribeInBackground(project: Project?, wavFile: File) {
         val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {

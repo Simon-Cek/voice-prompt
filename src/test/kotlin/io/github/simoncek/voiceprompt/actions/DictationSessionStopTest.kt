@@ -1,6 +1,5 @@
 package io.github.simoncek.voiceprompt.actions
 
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.testFramework.LightPlatformTestCase
 
 /**
@@ -9,14 +8,28 @@ import com.intellij.testFramework.LightPlatformTestCase
  * write and the model resolve — must not run there. This test pins that contract with a
  * capturing dispatcher: the blocking work must be QUEUED for a background thread, not executed
  * on the calling one.
+ *
+ * Review N2: uses a fresh [DictationSession] per test (disposed in [tearDown]) so the new
+ * per-session stop claim starts unclaimed, independent of other test classes.
  */
 class DictationSessionStopTest : LightPlatformTestCase() {
 
-    private fun session(): DictationSession =
-        ApplicationManager.getApplication().getService(DictationSession::class.java)
+    private lateinit var s: DictationSession
+
+    override fun setUp() {
+        super.setUp()
+        s = DictationSession()
+    }
+
+    override fun tearDown() {
+        try {
+            s.dispose()
+        } finally {
+            super.tearDown()
+        }
+    }
 
     fun test_stop_queues_its_blocking_work_off_the_calling_thread() {
-        val s = session()
         var queued: (() -> Unit)? = null
         s.stopWorkDispatcher = { queued = it }
         try {
@@ -29,8 +42,8 @@ class DictationSessionStopTest : LightPlatformTestCase() {
         } finally {
             s.stopWorkDispatcher = null
         }
-        // Run the captured work to a clean state (nothing is recording: empty samples -> IDLE).
-        // Safe off-EDT and on-EDT alike — the stop tail marshals its own UI updates.
+        // Run the captured work to a clean state. Nothing is recording here, so the review N2
+        // guard drops it before the stop tone and the phase change. Safe on- and off-EDT alike.
         queued!!.invoke()
     }
 }

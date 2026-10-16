@@ -1,6 +1,5 @@
 package io.github.simoncek.voiceprompt.actions
 
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.testFramework.LightPlatformTestCase
 import io.github.simoncek.voiceprompt.settings.CopilotVoiceSettings
 import io.github.simoncek.voiceprompt.settings.RecordingMode
@@ -83,11 +82,24 @@ class HoldReleasePredicateTest {
  */
 class DictationSessionHoldReleaseWiringTest : LightPlatformTestCase() {
 
-    private fun session(): DictationSession =
-        ApplicationManager.getApplication().getService(DictationSession::class.java)
+    private lateinit var s: DictationSession
+
+    override fun setUp() {
+        super.setUp()
+        // Review N2: a fresh session per test, so the per-session stop claim starts unclaimed
+        // and is independent of other test classes. Disposed in tearDown (AGENTS.md rule 2).
+        s = DictationSession()
+    }
+
+    override fun tearDown() {
+        try {
+            s.dispose()
+        } finally {
+            super.tearDown()
+        }
+    }
 
     fun test_release_during_start_calls_stop() {
-        val s = session()
         val originalMode = CopilotVoiceSettings.instance.mode
         CopilotVoiceSettings.instance.mode = RecordingMode.HOLD
 
@@ -121,7 +133,6 @@ class DictationSessionHoldReleaseWiringTest : LightPlatformTestCase() {
     }
 
     fun test_release_with_nothing_live_does_not_call_stop() {
-        val s = session()
         val originalMode = CopilotVoiceSettings.instance.mode
         CopilotVoiceSettings.instance.mode = RecordingMode.HOLD
 
