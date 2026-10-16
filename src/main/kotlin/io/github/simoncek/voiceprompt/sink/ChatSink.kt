@@ -18,12 +18,32 @@ interface ChatSink {
      * the tool window has finished showing (review #7) — so the result is reported through
      * [onComplete], which the sink invokes exactly once (on the EDT), instead of being returned.
      * A sink that cannot insert must report a failure, not swallow the call.
+     *
+     * [isCancelled] is the chain's settlement token: it turns true the moment the chain reports —
+     * a sink's success or the safety timeout. A sink that notices it before committing its
+     * insertion must back out with [SinkCancelledException] instead of inserting: the transcript
+     * has already reached the user via the balloon, and inserting now would deliver it twice
+     * (review N19).
      */
-    fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit)
+    fun insert(
+        project: Project?,
+        text: String,
+        autoSend: Boolean,
+        isCancelled: () -> Boolean,
+        onComplete: (Result<Unit>) -> Unit,
+    )
 }
 
 class NoCopilotWindowException(message: String = "GitHub Copilot chat window not found") : Exception(message)
 class InputNotFoundException(message: String = "Could not locate the Copilot chat input field") : Exception(message)
+
+/**
+ * Review N19: the sink discovered — right before committing its insertion — that the chain has
+ * already settled (the safety timer fired and the transcript went to the user via the balloon).
+ * Committing now would deliver the transcript twice, so the sink backed out. The chain has
+ * already reported, so it discards this result; it never reaches the caller.
+ */
+class SinkCancelledException(message: String = "the chain settled before this sink committed its insertion") : Exception(message)
 
 /**
  * Tries each [sink] in order, reporting the first successful insertion through [onComplete].
@@ -74,7 +94,10 @@ class ChatSinkChain(
             // A sink may throw (e.g. from setText or an editor write) as well as report a
             // failure; both must fall through to the next sink, not abort the chain.
             try {
-                sink.insert(project, text, autoSend) { result ->
+                // The settlement token: true the moment this chain reports (a sink's success or
+                // the safety timeout). A late sink that checks it before committing its insertion
+                // backs out instead of double-delivering (review N19).
+                sink.insert(project, text, autoSend, { completed.get() }) { result ->
                     if (result.isSuccess) {
                         complete(result)
                     } else {

@@ -1,6 +1,7 @@
 package io.github.simoncek.voiceprompt.sink
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import java.awt.Toolkit
 import java.awt.datatransfer.Clipboard
@@ -23,9 +24,17 @@ import javax.swing.JComponent
  */
 class ClipboardPasteSink : ChatSink {
 
+    private val log = Logger.getInstance(ClipboardPasteSink::class.java)
+
     override fun isAvailable(project: Project?): Boolean = CopilotChatLocator.findToolWindow(project) != null
 
-    override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
+    override fun insert(
+        project: Project?,
+        text: String,
+        autoSend: Boolean,
+        isCancelled: () -> Boolean,
+        onComplete: (Result<Unit>) -> Unit,
+    ) {
         val window = project?.let { CopilotChatLocator.findToolWindow(it) }
             ?: return onComplete(Result.failure(NoCopilotWindowException()))
         window.show()
@@ -40,6 +49,15 @@ class ClipboardPasteSink : ChatSink {
             is ChatInput.Editor -> lengthOf = { input.editor.document.textLength }
         }
         val target = input.component
+
+        if (isCancelled()) {
+            // Review N19: the chain has already settled — the safety timer fired and the
+            // transcript reached the user via the balloon. Back out before touching the
+            // clipboard or dispatching the paste, or we would deliver it twice and clobber the
+            // user's clipboard. The chain discards this result.
+            log.warn("insert: backed out — the chain settled before this sink committed")
+            return onComplete(Result.failure(SinkCancelledException()))
+        }
 
         val clipboard = Toolkit.getDefaultToolkit().systemClipboard
         val original: Transferable? = try {

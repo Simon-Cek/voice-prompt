@@ -17,13 +17,21 @@ class ChatSinkChainTest {
         var calls = 0
         var lastText: String? = null
         var lastAutoSend: Boolean? = null
+        var cancelledAtCommit: Boolean? = null
 
         override fun isAvailable(project: Project?): Boolean = available
 
-        override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
+        override fun insert(
+            project: Project?,
+            text: String,
+            autoSend: Boolean,
+            isCancelled: () -> Boolean,
+            onComplete: (Result<Unit>) -> Unit,
+        ) {
             calls++
             lastText = text
             lastAutoSend = autoSend
+            cancelledAtCommit = isCancelled()
             onComplete(result)
         }
     }
@@ -34,7 +42,13 @@ class ChatSinkChainTest {
 
         override fun isAvailable(project: Project?): Boolean = true
 
-        override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
+        override fun insert(
+            project: Project?,
+            text: String,
+            autoSend: Boolean,
+            isCancelled: () -> Boolean,
+            onComplete: (Result<Unit>) -> Unit,
+        ) {
             calls++
             throw RuntimeException(message)
         }
@@ -46,9 +60,46 @@ class ChatSinkChainTest {
 
         override fun isAvailable(project: Project?): Boolean = true
 
-        override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
+        override fun insert(
+            project: Project?,
+            text: String,
+            autoSend: Boolean,
+            isCancelled: () -> Boolean,
+            onComplete: (Result<Unit>) -> Unit,
+        ) {
             calls++
             // Deliberately never calls onComplete.
+        }
+    }
+
+    /**
+     * The review-N19 scenario: a sink that is still working when the safety timer fires. It
+     * checks the chain's settlement token at its commit point (the moment the real sinks would
+     * insert) and must back out — the transcript already reached the user via the balloon.
+     */
+    private class LateCommitterSink : ChatSink {
+        var committed = false
+        var sawCancelledAtCommit = false
+
+        override fun isAvailable(project: Project?): Boolean = true
+
+        override fun insert(
+            project: Project?,
+            text: String,
+            autoSend: Boolean,
+            isCancelled: () -> Boolean,
+            onComplete: (Result<Unit>) -> Unit,
+        ) {
+            // Simulate the slow sink (the window is still showing): wait well past the safety
+            // timeout, then decide at the commit point.
+            Thread.sleep(500)
+            if (isCancelled()) {
+                sawCancelledAtCommit = true
+                onComplete(Result.failure(SinkCancelledException()))
+            } else {
+                committed = true
+                onComplete(Result.success(Unit))
+            }
         }
     }
 
@@ -179,5 +230,40 @@ class ChatSinkChainTest {
         assertFalse(outcome.isSuccess)
         assertTrue(outcome.exceptionOrNull() is InputNotFoundException)
         assertEquals(1, hanging.calls)
+    }
+
+    @Test
+    fun `a late sink backs out instead of double-delivering after the safety timeout`() {
+        val late = LateCommitterSink()
+        val chain = ChatSinkChain(listOf(late), safetyTimeoutMs = 100)
+
+        val result = AtomicReference<Result<Unit>?>(null)
+        chain.insert(null, "hi", autoSend = false) { result.set(it) }
+
+        // The safety timer (EDT) must cut the late sink off and report the failure — the
+        // balloon fallback — before the sink wakes up.
+        val deadline = System.currentTimeMillis() + 3_000
+        while (result.get() == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+        val outcome = result.get() ?: throw AssertionError("the chain never reported a result")
+
+        assertFalse("the timeout must still fail over to the balloon", outcome.isSuccess)
+        assertTrue(outcome.exceptionOrNull() is InputNotFoundException)
+        // The sink's late failure was discarded (the chain already reported) and — the point of
+        // review N19 — the sink never committed its insertion: no double delivery.
+        assertTrue("the late sink must have seen the chain settle", late.sawCancelledAtCommit)
+        assertFalse("the late sink must not have committed its insertion", late.committed)
+    }
+
+    @Test
+    fun `a fast sink sees the token uncancelled`() {
+        val fast = StubSink()
+        val chain = ChatSinkChain(listOf(fast))
+
+        val result = insert(chain)
+
+        assertTrue(result.isSuccess)
+        assertEquals("a sink that commits within the window must not be cancelled", false, fast.cancelledAtCommit)
     }
 }

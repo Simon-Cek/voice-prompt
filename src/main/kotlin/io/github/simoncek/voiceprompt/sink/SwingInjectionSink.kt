@@ -20,20 +20,27 @@ class SwingInjectionSink : ChatSink {
 
     override fun isAvailable(project: Project?): Boolean = CopilotChatLocator.findToolWindow(project) != null
 
-    override fun insert(project: Project?, text: String, autoSend: Boolean, onComplete: (Result<Unit>) -> Unit) {
+    override fun insert(
+        project: Project?,
+        text: String,
+        autoSend: Boolean,
+        isCancelled: () -> Boolean,
+        onComplete: (Result<Unit>) -> Unit,
+    ) {
         val p = project ?: return onComplete(Result.failure(NoCopilotWindowException()))
         val window = CopilotChatLocator.findToolWindow(p) ?: return onComplete(Result.failure(NoCopilotWindowException()))
 
         // Copilot can create its composer lazily, after the tool window has been shown (review #7):
         // search inside the "window is shown" callback, and retry once if the content is still
         // under construction — the very first dictation with a closed chat used to find nothing.
+        // The settlement token travels with every deferred round (review N19).
         val content = window.contentManager.contents.firstOrNull()
         when {
-            content == null -> window.show { attempt(p, window, text, autoSend, last = false, onComplete) }
-            content.component == null -> window.activate { attempt(p, window, text, autoSend, last = false, onComplete) }
+            content == null -> window.show { attempt(p, window, text, autoSend, last = false, isCancelled, onComplete) }
+            content.component == null -> window.activate { attempt(p, window, text, autoSend, last = false, isCancelled, onComplete) }
             else -> {
                 window.show()
-                attempt(p, window, text, autoSend, last = false, onComplete)
+                attempt(p, window, text, autoSend, last = false, isCancelled, onComplete)
             }
         }
     }
@@ -44,11 +51,12 @@ class SwingInjectionSink : ChatSink {
         text: String,
         autoSend: Boolean,
         last: Boolean,
+        isCancelled: () -> Boolean,
         onComplete: (Result<Unit>) -> Unit,
     ) {
         val input = CopilotChatLocator.findInput(window)
         if (input != null) {
-            onComplete(inject(p, input, text, autoSend))
+            onComplete(inject(p, input, text, autoSend, isCancelled))
             return
         }
         if (last) {
@@ -58,11 +66,19 @@ class SwingInjectionSink : ChatSink {
         // One retry after the event queue has settled — the composer may still be under
         // construction.
         ApplicationManager.getApplication().invokeLater {
-            attempt(p, window, text, autoSend, last = true, onComplete)
+            attempt(p, window, text, autoSend, last = true, isCancelled, onComplete)
         }
     }
 
-    private fun inject(p: Project, input: ChatInput, text: String, autoSend: Boolean): Result<Unit> {
+    private fun inject(p: Project, input: ChatInput, text: String, autoSend: Boolean, isCancelled: () -> Boolean): Result<Unit> {
+        if (isCancelled()) {
+            // Review N19: the chain has already settled — the safety timer fired and the
+            // transcript reached the user via the balloon. Inserting now would deliver it
+            // twice (and the Enter below would be the issue #7 risk). Back out; the chain
+            // discards this result.
+            log.warn("insert: backed out — the chain settled before this sink committed")
+            return Result.failure(SinkCancelledException())
+        }
         when (input) {
             is ChatInput.Swing -> {
                 log.info("insert: Swing branch, target=${input.field.javaClass.name}")
