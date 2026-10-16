@@ -67,6 +67,13 @@ class AudioCapture(
     internal @Volatile var sampleState: Int = AWAITING
         internal set
 
+    /**
+     * Test seam (review N5): a factory for the capture line, so the flush-before-start
+     * contract can be proven against a fake line without a real audio device. Null (the
+     * default) = [MicrophoneResolver.resolve]. Tests must reset it to null in tearDown.
+     */
+    internal @Volatile var lineFactoryForTest: ((mixerName: String?, format: AudioFormat) -> TargetDataLine)? = null
+
     // One daemon thread for the deferred "close the kept-ready line" — never a new thread
     // per event (the review's #10 rule for Beeps applies here too), and daemon so it cannot
     // hold the IDE shutdown or the plugin class loader (review #6).
@@ -87,15 +94,32 @@ class AudioCapture(
         }
         keepReadyTask?.cancel(false)
         lineGeneration++
-        val dataLine = try {
+        val opened = try {
             openLine(mixerName)
         } catch (t: Throwable) {
             recording.set(false)
             throw t
         }
-        buffer.reset()
-        sampleState = AWAITING
+        var dataLine = opened.line
         try {
+            // Review N5: a keep-ready line was only stopped, not closed — per the Java Sound
+            // contract a stopped line retains its buffered data, so the first read of this
+            // clip would replay the tail of the previous one (and awaitFirstSample would
+            // report "ready" on that stale audio). A fresh line is flushed as a harmless
+            // no-op; a reused line must be verifiably empty, or it is discarded and a fresh
+            // one resolved (one retry, no loop) — only a failed fresh open fails the start.
+            if (opened.reused) {
+                if (!cleanReusedLine(dataLine)) {
+                    runCatching { dataLine.close() }
+                    if (line === dataLine) line = null
+                    dataLine = resolveFreshLine(mixerName)
+                    bestEffortFlush(dataLine)
+                }
+            } else {
+                bestEffortFlush(dataLine)
+            }
+            buffer.reset()
+            sampleState = AWAITING
             dataLine.start()
         } catch (t: Throwable) {
             runCatching { dataLine.close() }
@@ -179,19 +203,25 @@ class AudioCapture(
     }
 
     /**
+     * The result of [openLine]: the line, and whether it is a previously owned one ([reused] —
+     * which may hold stale buffered data, review N5) or a freshly resolved one.
+     */
+    private data class OpenedLine(val line: TargetDataLine, val reused: Boolean)
+
+    /**
      * Opens a capture line for [mixerName] (null = system default), reusing the previously
      * resolved line when it is still the right device and still openable.
      */
-    private fun openLine(mixerName: String?): TargetDataLine {
+    private fun openLine(mixerName: String?): OpenedLine {
         val cached = line
         if (cached != null && lineDevice == mixerName) {
             if (cached.isOpen) {
                 // The keep-ready window: the line is open (but stopped) for this device.
-                return cached
+                return OpenedLine(cached, reused = true)
             }
             try {
                 cached.open(format, BUFFER_FRAMES)
-                return cached
+                return OpenedLine(cached, reused = true)
             } catch (t: Throwable) {
                 // The device went away (unplugged?) or the driver wedged: drop the cache and
                 // resolve fresh — the caller's fallback logic still applies.
@@ -200,11 +230,54 @@ class AudioCapture(
                 line = null
             }
         }
-        val dataLine = MicrophoneResolver.resolve(mixerName, format)
+        return OpenedLine(resolveFreshLine(mixerName), reused = false)
+    }
+
+    /** The fresh path: [lineFactoryForTest] (tests) or [MicrophoneResolver.resolve], then open. */
+    private fun resolveFreshLine(mixerName: String?): TargetDataLine {
+        val factory = lineFactoryForTest
+        val dataLine = if (factory != null) factory(mixerName, format) else MicrophoneResolver.resolve(mixerName, format)
         dataLine.open(format, BUFFER_FRAMES)
         line = dataLine
         lineDevice = mixerName
         return dataLine
+    }
+
+    /**
+     * Review N5, fresh line: the flush is a no-op in principle (a fresh line has no buffered
+     * data) — never fail the start over it.
+     */
+    private fun bestEffortFlush(dataLine: TargetDataLine) {
+        runCatching { dataLine.flush() }.onFailure {
+            log.debug("flush of a fresh line failed; ignoring it (a fresh line has no buffered data)", it)
+        }
+    }
+
+    /**
+     * Review N5, keep-ready line: it was only stopped, not closed, and per the Java Sound
+     * contract a stopped line retains its buffered data. Flush it and verify it is empty; if
+     * the flush throws or data remains, the line cannot be trusted to be clean. Only byte
+     * counts are logged — never audio content (AGENTS.md rule 8).
+     */
+    private fun cleanReusedLine(dataLine: TargetDataLine): Boolean {
+        val staleBytes = runCatching { dataLine.available() }.getOrNull()
+        if (!runCatching { dataLine.flush() }.isSuccess) {
+            log.debug("flush of the keep-ready line failed; replacing it with a fresh line")
+            return false
+        }
+        val remainingBytes = runCatching { dataLine.available() }.getOrNull()
+        if (remainingBytes == null) {
+            log.debug("cannot verify the keep-ready line is empty after flush; replacing it")
+            return false
+        }
+        if (remainingBytes > 0) {
+            log.debug("$remainingBytes bytes survived the flush of the keep-ready line; replacing it")
+            return false
+        }
+        if ((staleBytes ?: 0) > 0) {
+            log.debug("discarded $staleBytes stale bytes from the keep-ready line")
+        }
+        return true
     }
 
     private fun scheduleKeepReadyClose(dataLine: TargetDataLine, seconds: Long) {
