@@ -27,13 +27,19 @@ import java.util.concurrent.TimeUnit
  * transcription, restarted when the model or the GPU/thread settings change, stopped after
  * [IDLE_TIMEOUT_MS] of inactivity, and killed on [shutdown] (IDE shutdown / plugin unload).
  *
- * When the server is not available (platform bundles no binary — e.g. Windows for now — or it
- * fails to start), [transcribe] falls back to the one-shot [WhisperCliEngine] path, so dictation
- * keeps working exactly as before.
+ * When the server is not available (platform bundles no binary, or the start fails),
+ * [transcribe] falls back to the one-shot [WhisperCliEngine] path, so dictation keeps working
+ * exactly as before.
  *
  * Review P3: a request that fails on the GPU-backed server is retried once on a CPU-restarted
  * server (`--no-gpu`) before the CLI fallback — the same GPU→CPU safety net as
  * [WhisperCliEngine.transcribe].
+ *
+ * Review N8: the start — spawning plus the /health wait (up to [STARTUP_TIMEOUT_MS]) — runs
+ * OUTSIDE the lock. [shutdown], the idle reaper and a concurrent stop therefore kill the
+ * in-flight process instead of blocking on it; the wait honours the task's Cancel button; and
+ * a cancelled or aborted start never sets the [STARTUP_BACKOFF_MS] backoff — only a real
+ * failure (the process died, the wait timed out) does.
  *
  * Protocol (whisper.cpp v1.9.5 server, verified against the bundled build): multipart/form-data
  * `POST /inference` with a `file` part (the WAV) plus text fields (`response_format=text`,
@@ -58,11 +64,32 @@ object WhisperServerEngine {
 
     private class ServerHandle(val process: java.lang.Process, val port: Int, val key: ServerKey, val logFile: File)
 
+    /** Review N8: a spawn-in-progress (see [starting]); the caller that spawned owns [process]. */
+    private class Starting(val key: ServerKey) {
+        @Volatile var process: java.lang.Process? = null
+        @Volatile var port = 0
+    }
+
+    /** The decision-section outcome of [ensureRunning]: what to stop, and who owns the start. */
+    private class Claim(val starter: Starting?, val oldProcess: java.lang.Process?, val foreign: Starting?)
+
     /** Serialises start/stop/replace of the server process (same shape as [WhisperRuntime.LOCK]). */
     private val LOCK = Any()
 
     @Volatile
     private var handle: ServerHandle? = null
+
+    /**
+     * Review N8: a server that has been spawned but not yet answered /health. It is published
+     * BEFORE the slow wait so [stopCurrent]/[shutdown] can kill it and a same-key caller can wait
+     * on it — all without blocking on the wait itself.
+     */
+    @Volatile
+    private var starting: Starting? = null
+
+    /** Review N8 #1: set by [shutdown]; a start in flight must not outlive the plugin. */
+    @Volatile
+    private var shuttingDown = false
 
     /** Wall time of the last successful inference; the idle reaper stops the server past [IDLE_TIMEOUT_MS]. */
     @Volatile
@@ -71,6 +98,10 @@ object WhisperServerEngine {
     /** Wall time of the last failed startup; while the backoff window is open we skip straight to the CLI. */
     @Volatile
     private var lastStartupFailure = 0L
+
+    /** Review N8 #7: the /health wait bound (default [STARTUP_TIMEOUT_MS]); tests override it. */
+    internal var startupTimeoutMsForTest: Long? = null
+    private val startupTimeoutMs: Long get() = startupTimeoutMsForTest ?: STARTUP_TIMEOUT_MS
 
     private val client: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
 
@@ -126,7 +157,7 @@ object WhisperServerEngine {
     ): String {
         val key = ServerKey(model, useGpu, threads)
         if (serverBinary != null && !inStartupBackoff()) {
-            val active = synchronized(LOCK) { ensureRunning(key, serverBinary, logFile) }
+            val active = ensureRunning(key, serverBinary, logFile, indicator)
             if (active != null) {
                 try {
                     val raw = request(active, wavFile, language, timeoutMs, indicator)
@@ -147,9 +178,7 @@ object WhisperServerEngine {
                     // process. Timeouts and cancellations are handled above and do not retry.
                     if (useGpu) {
                         log.warn("whisper-server request failed on the GPU (${t.message}); retrying once with --no-gpu")
-                        val cpuActive = synchronized(LOCK) {
-                            ensureRunning(ServerKey(model, false, threads), serverBinary, logFile)
-                        }
+                        val cpuActive = ensureRunning(ServerKey(model, false, threads), serverBinary, logFile, indicator)
                         if (cpuActive != null) {
                             try {
                                 val raw = request(cpuActive, wavFile, language, timeoutMs, indicator)
@@ -183,45 +212,100 @@ object WhisperServerEngine {
         return WhisperCliEngine().transcribe(wavFile, model, language, timeoutMs, useGpu, threads, indicator)
     }
 
-    /** Returns the running handle for [key], starting or replacing the server when needed. */
-    private fun ensureRunning(key: ServerKey, serverBinary: Path, logFile: File): ServerHandle? =
-        synchronized(LOCK) {
+    /**
+     * Returns the running handle for [key], starting or replacing the server when needed.
+     *
+     * Review N8: only the decision (what to replace) and the publish take [LOCK]. Spawning plus
+     * the /health wait (up to [startupTimeoutMs]) run outside it, so [shutdown], the idle reaper
+     * and a concurrent stop never block on a slow startup — they kill the in-flight process
+     * instead — and the wait honours the task's Cancel button. Every path converges on
+     * [resolveStart], which always clears the claim and never leaves an unpublished process
+     * running.
+     */
+    private fun ensureRunning(
+        key: ServerKey,
+        serverBinary: Path,
+        logFile: File,
+        indicator: ProgressIndicator?,
+    ): ServerHandle? {
+        val claim = synchronized(LOCK) {
+            // Review N8 #1: a dispose in progress must never spawn a server that outlives it.
+            if (shuttingDown) return null
+            // Fast path: a healthy server for this key.
             handle?.let { existing ->
                 if (existing.key == key && existing.process.isAlive) return existing
             }
-            handle?.let { existing ->
-                if (!existing.process.isAlive) {
-                    log.info("whisper-server died (log: ${existing.logFile}); restarting")
-                } else {
-                    log.info("whisper-server restart: was ${existing.key}, now $key")
+            val inFlight = starting
+            if (inFlight != null && inFlight.key == key) {
+                // Review N8 #4: a start for the same key is already in flight — wait for it
+                // (bounded, honouring our own Cancel) instead of spawning a second server.
+                Claim(null, null, null)
+            } else {
+                // A start for a different key (if any) loses: the caller that spawned it owns the
+                // process and it is killed below. A dead or wrong-key handle is replaced the same way.
+                val foreign = starting
+                handle?.let { existing ->
+                    if (!existing.process.isAlive) {
+                        log.info("whisper-server died (log: ${existing.logFile}); restarting")
+                    } else {
+                        log.info("whisper-server restart: was ${existing.key}, now $key")
+                    }
                 }
-                stopProcess(existing.process)
+                val oldProcess = handle?.process
+                handle = null
+                starting = null
+                val starter = Starting(key)
+                starting = starter
+                Claim(starter, oldProcess, foreign)
             }
-            handle = null
-            val port = freePort()
-            val process = try {
-                launch(serverBinary, key, port, logFile)
-            } catch (t: Throwable) {
-                log.warn("failed to start whisper-server at $serverBinary", t)
-                null
-            }
-            if (process == null) {
-                markStartupFailure()
-                return null
-            }
-            val started = ServerHandle(process, port, key, logFile)
-            handle = started
-            lastUsed = System.currentTimeMillis()
-            log.info("whisper-server started: 127.0.0.1:$port key=$key log=${logFile.absolutePath}")
-            started
         }
+        val starter = claim.starter ?: return awaitSameKeyStart(key, indicator)
+
+        // Stop whatever we displaced OUTSIDE the lock (review N8 #5: destroy + waitFor is not
+        // lock-safe). An in-flight start from a different key dies immediately.
+        claim.oldProcess?.let { stopProcess(it) }
+        claim.foreign?.process?.let { it.destroyForcibly() }
+
+        var ready: java.lang.Process? = null
+        var cancelled: ProcessCanceledException? = null
+        try {
+            starter.port = freePort()
+            val process = startProcess(serverBinary, key, starter.port, logFile)
+            starter.process = process
+            ready = waitForHealth(starter.port, process, logFile, indicator, startupTimeoutMs)
+        } catch (e: ProcessCanceledException) {
+            // Review N8 #2: a cancel is NOT a startup failure — no backoff. [resolveStart]
+            // clears the claim and rethrows the cancel.
+            cancelled = e
+        } catch (t: Throwable) {
+            log.warn("failed to start whisper-server at $serverBinary", t)
+        }
+        return resolveStart(starter, ready, cancelled, key, logFile)
+    }
 
     /**
-     * Starts the server and waits until it answers `/health`, or returns null when it dies during
-     * startup (model load failure, bad binary, …). [STARTUP_TIMEOUT_MS] covers a large model
-     * loading on a slow machine; the first dictation of a session pays this once.
+     * Review N8 #4: another caller is starting the same key. Wait for it to resolve — bounded by
+     * the startup timeout plus a margin, honouring our own [indicator] — and return the published
+     * handle, or null when the start failed (the caller then falls back as usual).
      */
-    private fun launch(serverBinary: Path, key: ServerKey, port: Int, logFile: File): java.lang.Process? {
+    private fun awaitSameKeyStart(key: ServerKey, indicator: ProgressIndicator?): ServerHandle? {
+        val deadline = System.currentTimeMillis() + startupTimeoutMs + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            indicator?.checkCanceled()
+            synchronized(LOCK) {
+                handle?.let { if (it.key == key && it.process.isAlive) return it }
+                if (starting == null) return null
+            }
+            Thread.sleep(50)
+        }
+        return null
+    }
+
+    /**
+     * Spawns the server process (fast, no waiting). Review N8: split from the /health wait so
+     * the slow part runs outside [LOCK].
+     */
+    private fun startProcess(serverBinary: Path, key: ServerKey, port: Int, logFile: File): java.lang.Process {
         val dir = WhisperRuntime.runtimeDir(serverBinary).let { File(it) }
         // A long-lived process with its streams parked in a log file: ProcessBuilder is the
         // honest tool here (GeneralCommandLine has no file-redirect API, and the capturing
@@ -234,20 +318,101 @@ object WhisperServerEngine {
             // The server links the bundled libwhisper/libggml shared objects that sit next to it.
             builder.environment()["LD_LIBRARY_PATH"] = dir.absolutePath
         }
-        val process = builder.start()
-        val deadline = System.currentTimeMillis() + STARTUP_TIMEOUT_MS
-        while (System.currentTimeMillis() < deadline) {
-            if (!process.isAlive) {
-                log.warn("whisper-server exited during startup (log: ${logFile.absolutePath})")
-                logTail(logFile)
-                return null
+        return builder.start()
+    }
+
+    /**
+     * Waits until the server answers `/health`. Returns the ready process, or null when it dies
+     * during startup (model load failure, bad binary, …) or the wait times out — both cases leave
+     * the process stopped. [startupTimeoutMs] covers a large model loading on a slow machine; the
+     * first dictation of a session pays this once.
+     *
+     * A cancel from [indicator] kills the process and rethrows [ProcessCanceledException] — the
+     * Cancel button must work during the wait (review N8).
+     */
+    private fun waitForHealth(
+        port: Int,
+        process: java.lang.Process,
+        logFile: File,
+        indicator: ProgressIndicator?,
+        timeoutMs: Long,
+    ): java.lang.Process? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                indicator?.checkCanceled()
+                if (!process.isAlive) {
+                    log.warn("whisper-server exited during startup (log: ${logFile.absolutePath})")
+                    logTail(logFile)
+                    return null
+                }
+                if (isReady(port)) return process
+                Thread.sleep(250)
             }
-            if (isReady(port)) return process
-            Thread.sleep(250)
+            log.warn("whisper-server not ready after ${timeoutMs} ms (log: ${logFile.absolutePath})")
+            process.destroyForcibly()
+            return null
+        } catch (e: ProcessCanceledException) {
+            process.destroyForcibly()
+            throw e
         }
-        log.warn("whisper-server not ready after ${STARTUP_TIMEOUT_MS} ms (log: ${logFile.absolutePath})")
-        stopProcess(process)
-        return null
+    }
+
+    /**
+     * The single resolution point of a start (review N8 #6): the claim is always cleared or
+     * published, an unpublished process is always killed, and the backoff is marked only on a
+     * REAL failure — a cancel or a shutdown never sets it (review N8 #2).
+     */
+    private fun resolveStart(
+        starter: Starting,
+        ready: java.lang.Process?,
+        cancelled: ProcessCanceledException?,
+        key: ServerKey,
+        logFile: File,
+    ): ServerHandle? {
+        var published: ServerHandle? = null
+        val outcome = synchronized(LOCK) {
+            // The claim is ours only if nobody else cleared it (stop/shutdown/takeover).
+            val mine = starting == starter
+            if (mine) starting = null
+            when {
+                cancelled != null -> "cancelled"
+                !mine || shuttingDown -> "aborted"
+                ready == null -> {
+                    markStartupFailure()
+                    "failed"
+                }
+                else -> {
+                    published = ServerHandle(ready, starter.port, key, logFile)
+                    handle = published
+                    lastUsed = System.currentTimeMillis()
+                    "published"
+                }
+            }
+        }
+        // All process work OUTSIDE the lock (review N8 #5).
+        return when (outcome) {
+            "published" -> {
+                log.info("whisper-server started: 127.0.0.1:${published!!.port} key=$key log=${logFile.absolutePath}")
+                published
+            }
+            "cancelled" -> {
+                starter.process?.let { if (it.isAlive) it.destroyForcibly() }
+                throw cancelled!!
+            }
+            "aborted" -> {
+                // Review N8 #3: a stop/shutdown or a different-key claim won the race — kill what
+                // we spawned and surface a cancellation.
+                ready?.let { if (it.isAlive) it.destroyForcibly() }
+                throw ProcessCanceledException()
+            }
+            else -> {
+                // "failed": it died during startup or the wait timed out (both already stopped by
+                // waitForHealth) — or the spawn threw before a process existed.
+                starter.process?.let { if (it.isAlive) it.destroyForcibly() }
+                null
+            }
+        }
     }
 
     /** One inference over the server's HTTP endpoint, with cancellation and timeout handling. */
@@ -294,20 +459,54 @@ object WhisperServerEngine {
     }
 
     /**
-     * Stops the current server (if any). Idempotent. Called from [DictationSession] on dispose so
-     * no inference process outlives the plugin (review #6), and from the failure paths above.
+     * Stops the current server (if any) and any start in flight. Idempotent. Called from
+     * [DictationSession] on dispose so no inference process outlives the plugin (review #6), and
+     * from the failure paths above.
+     *
+     * Review N8 #1: [shuttingDown] is set first (under the lock, atomic with the claim state),
+     * so a start in progress can never outlive the plugin and no new one can begin.
      */
     fun shutdown() {
-        synchronized(LOCK) {
-            handle?.let { stopProcess(it.process) }
-            handle = null
-        }
+        synchronized(LOCK) { shuttingDown = true }
+        stopCurrent()
         idleReaper.shutdownNow()
     }
 
-    private fun stopCurrent() = synchronized(LOCK) {
-        handle?.let { stopProcess(it.process) }
-        handle = null
+    /**
+     * Captures the current state under the lock and stops whatever it points at OUTSIDE it
+     * (review N8 #5): a running server gets a graceful 3 s, an in-flight start dies immediately.
+     */
+    private fun stopCurrent() {
+        val (oldProcess, inFlight) = synchronized(LOCK) {
+            val p = handle?.process
+            handle = null
+            val f = starting
+            starting = null
+            p to f
+        }
+        oldProcess?.let { stopProcess(it) }
+        inFlight?.process?.let { it.destroyForcibly() }
+    }
+
+    /**
+     * Test seam (review N8): this object is process-wide, and its state (a running server, an
+     * in-flight start, the shutdown flag, the backoff, the timeout override) outlives individual
+     * tests.
+     */
+    internal fun resetForTest() {
+        val (oldProcess, inFlight) = synchronized(LOCK) {
+            shuttingDown = false
+            val p = handle?.process
+            handle = null
+            val f = starting
+            starting = null
+            p to f
+        }
+        idleReaper.shutdownNow()
+        oldProcess?.let { stopProcess(it) }
+        inFlight?.process?.let { it.destroyForcibly() }
+        startupTimeoutMsForTest = null
+        lastStartupFailure = 0L
     }
 
     private fun stopProcess(process: java.lang.Process) {
@@ -318,6 +517,8 @@ object WhisperServerEngine {
     }
 
     private fun reapIdle() {
+        // Review N8 #6: an in-flight start means a dictation is active — the reaper backs off.
+        if (starting != null) return
         if (System.currentTimeMillis() - lastUsed > IDLE_TIMEOUT_MS) {
             log.info("whisper-server idle for over ${IDLE_TIMEOUT_MS / 60_000} min; stopping it")
             stopCurrent()

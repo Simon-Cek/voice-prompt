@@ -529,11 +529,14 @@ class WhisperServerIntegrationTest {
             Files.copy(input, modelFile, StandardCopyOption.REPLACE_EXISTING)
         }
         model = modelFile
+        // N8: shutdown() is sticky (shuttingDown) — reset the engine state for each test.
+        WhisperServerEngine.resetForTest()
     }
 
     @After
     fun tearDown() {
         WhisperServerEngine.shutdown()
+        WhisperServerEngine.resetForTest()
         workDir?.toFile()?.deleteRecursively()
     }
 
@@ -726,11 +729,14 @@ class WhisperServerGpuRetryTest {
         w.writeBytes(byteArrayOf(1, 2, 3, 4))
         w.deleteOnExit()
         wav = w
+        // N8: shutdown() is sticky (shuttingDown) — reset the engine state for each test.
+        WhisperServerEngine.resetForTest()
     }
 
     @After
     fun tearDown() {
         WhisperServerEngine.shutdown()
+        WhisperServerEngine.resetForTest()
         dir?.toFile()?.deleteRecursively()
     }
 
