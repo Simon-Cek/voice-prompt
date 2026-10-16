@@ -28,5 +28,16 @@ class PushToTalkAction : AnAction() {
         fun stopRecording() {
             DictationSession.instance.stop()
         }
+
+        /**
+         * Cancels every in-flight and queued transcription from anywhere (the status bar
+         * widget's click while TRANSCRIBING, review §3). Each live clip is reached through its
+         * [TranscriptionHandle]: a running clip's [ProgressIndicator] is cancelled, and a clip
+         * whose task has not started yet bails the moment its task does — the engine never
+         * runs for a cancelled clip.
+         */
+        fun cancelTranscription() {
+            DictationSession.instance.cancelTranscription()
+        }
     }
 }

@@ -13,6 +13,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import io.github.simoncek.voiceprompt.VoiceBundle
@@ -40,6 +41,7 @@ import java.awt.event.KeyEvent
 import java.awt.event.WindowEvent
 import java.io.File
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -70,6 +72,43 @@ internal fun shouldStopOnDeactivate(
     isRecording: Boolean,
     isStarting: Boolean,
 ): Boolean = mode == RecordingMode.HOLD && (isRecording || isStarting)
+
+/**
+ * Review §3: the per-clip cancellation handle (the per-clip object from review N4, extended).
+ *
+ * The platform's [Task] has no `cancel()` of its own — its [ProgressIndicator] is the
+ * cancellation seam — and a clip whose task has not started yet has no indicator to cancel.
+ * So [DictationSession.cancelTranscription] reaches every live clip through its handle: it
+ * sets [cancelRequested], which [DictationSession.transcribeBody] checks first (so a clip
+ * whose task has not started yet bails the moment it does, before the engine ever runs), and
+ * cancels [indicator] once the task has started.
+ *
+ * The handle also carries the exactly-once release flag (review N4): [releaseOnce] lets
+ * whichever exit path fires first — `transcribeBody`'s finally, the task's
+ * onCancel/onFinished/onThrowable, or a failed queue()/WAV hand-off — take the clip, and a
+ * duplicate release is a no-op.
+ */
+internal class TranscriptionHandle {
+
+    private val released = AtomicBoolean(false)
+
+    /** Set when the task starts ([Task.Backgroundable.run]); [cancel] then cancels the running task. */
+    @Volatile
+    var indicator: ProgressIndicator? = null
+
+    /** Set by [cancel]; checked at the start of `transcribeBody` and while it waits its turn. */
+    @Volatile
+    var cancelRequested: Boolean = false
+        private set
+
+    fun cancel() {
+        cancelRequested = true
+        indicator?.cancel()
+    }
+
+    /** Exactly-once release (review N4): the first call wins, later calls are no-ops. */
+    fun releaseOnce(): Boolean = released.compareAndSet(false, true)
+}
 
 /**
  * The owner of the live dictation session: the global key watcher (an AWT event listener), the
@@ -170,6 +209,12 @@ class DictationSession : Disposable {
      * recording nor the status bar widget while a later one is still running.
      */
     private val activeTranscriptions = AtomicInteger(0)
+    /**
+     * Review §3: every live transcription clip — running and queued — with its
+     * [TranscriptionHandle]. [cancelTranscription] reaches each live clip through its handle;
+     * a released clip removes its handle, so a later cancel cannot reach a dead clip.
+     */
+    private val activeHandles = CopyOnWriteArraySet<TranscriptionHandle>()
     /** Wait-loop poll while a queued transcription holds its turn (review P5). */
     private val TRANSCRIPTION_QUEUE_POLL_MS = 100L
 
@@ -536,15 +581,15 @@ class DictationSession : Disposable {
         // Review N4: the clip is in-flight from here, before the task queue runs it — claimed
         // here and released exactly once by whichever exit path takes it first
         // ([releaseTranscription]).
-        val clip = claimTranscription()
+        val handle = claimTranscription()
         try {
             val wavFile = File(System.getProperty("java.io.tmpdir"), "copilot-voice-${System.currentTimeMillis()}.wav")
             WavFile.write(wavFile, samples, AudioCapture.DEFAULT_FORMAT)
-            transcribeInBackground(target, wavFile, clip)
+            transcribeInBackground(target, wavFile, handle)
         } catch (t: Exception) {
             // Review N4: the WAV write failed after the claim — release the clip here, or the
             // counter never drops and the phase can never return to IDLE.
-            releaseTranscription(clip)
+            releaseTranscription(handle)
             notify(target, VoiceBundle.message("notification.wav.failed", t.message ?: t.javaClass.simpleName), NotificationType.WARNING)
         }
     }
@@ -603,13 +648,13 @@ class DictationSession : Disposable {
      * before the hand-off — so a test that drives [transcribeBody] directly (review P5) keeps
      * the in-flight counter balanced.
      */
-    internal fun claimTranscriptionForTest(): AtomicBoolean = claimTranscription()
+    internal fun claimTranscriptionForTest(): TranscriptionHandle = claimTranscription()
 
     /**
      * Test seam (review N4): release a claimed clip exactly as the production exit paths do —
      * so a test can prove the exactly-once semantics (a duplicate release must be a no-op).
      */
-    internal fun releaseTranscriptionForTest(clip: AtomicBoolean) = releaseTranscription(clip)
+    internal fun releaseTranscriptionForTest(handle: TranscriptionHandle) = releaseTranscription(handle)
 
     /**
      * Test seam (review N4): replaces the task-queue hand-off in [transcribeInBackground] so a
@@ -617,18 +662,18 @@ class DictationSession : Disposable {
      * the phase can return to IDLE. Returns true when the clip was accepted by the hand-off.
      * Null (the default) = the real Task.Backgroundable path.
      */
-    internal var transcribeHandoff: ((project: Project?, wavFile: File, clip: AtomicBoolean) -> Boolean)? = null
+    internal var transcribeHandoff: ((project: Project?, wavFile: File, handle: TranscriptionHandle) -> Boolean)? = null
 
-    private fun transcribeInBackground(project: Project?, wavFile: File, clip: AtomicBoolean) {
+    private fun transcribeInBackground(project: Project?, wavFile: File, handle: TranscriptionHandle) {
         // Test seam first (review N4: a test makes the hand-off fail — the task never runs —
         // and proves the clip is still released), else the production path.
         var failed: Exception? = null
         val handoff = transcribeHandoff
         val queued = if (handoff != null) {
-            handoff(project, wavFile, clip)
+            handoff(project, wavFile, handle)
         } else {
             try {
-                queueTranscriptionTask(project, wavFile, clip)
+                queueTranscriptionTask(project, wavFile, handle)
                 true
             } catch (t: Exception) {
                 failed = t
@@ -639,31 +684,36 @@ class DictationSession : Disposable {
             // Review N4: the task never runs (a failed queue() in production, a failed hand-off
             // in the test) — release the clip here, or the counter never drops and the phase
             // can never return to IDLE.
-            releaseTranscription(clip)
+            releaseTranscription(handle)
             runCatching { wavFile.delete() }
             val reason = failed?.message ?: failed?.javaClass?.simpleName ?: "the transcription task could not be started"
             notify(project, VoiceBundle.message("notification.wav.failed", reason), NotificationType.WARNING)
         }
     }
 
-    private fun queueTranscriptionTask(project: Project?, wavFile: File, clip: AtomicBoolean) {
+    private fun queueTranscriptionTask(project: Project?, wavFile: File, handle: TranscriptionHandle) {
         val task = object : Task.Backgroundable(project, VoiceBundle["notification.transcribing"], true) {
             override fun run(indicator: ProgressIndicator) {
-                transcribeBody(indicator, project, wavFile, clip)
+                // Review §3: capture the clip's indicator the moment the task starts, so
+                // [cancelTranscription] can cancel a running clip (the platform Task has no
+                // cancel() of its own). The cancelRequested flag covers the queue-to-start
+                // gap — [transcribeBody] checks it first.
+                handle.indicator = indicator
+                transcribeBody(indicator, project, wavFile, handle)
             }
             // Review N4: the clip is released exactly once by whichever exit path takes it
-            // first (the AtomicBoolean in [releaseTranscription]). These hooks cover a task
+            // first (releaseOnce in [releaseTranscription]). These hooks cover a task
             // that is cancelled before or without running [run]; a duplicate release is a no-op.
             override fun onFinished() {
-                releaseTranscription(clip)
+                releaseTranscription(handle)
             }
 
             override fun onCancel() {
-                releaseTranscription(clip)
+                releaseTranscription(handle)
             }
 
             override fun onThrowable(t: Throwable) {
-                releaseTranscription(clip)
+                releaseTranscription(handle)
             }
         }
         task.queue()
@@ -689,14 +739,16 @@ class DictationSession : Disposable {
     /**
      * Review N4: claim one transcription slot — called in [finishCapturedClip] before the
      * hand-off to the task queue, so the phase is TRANSCRIBING while the clip waits its turn,
-     * not only while it runs. Returns the clip's exactly-once release flag, for
+     * not only while it runs. Returns the clip's [TranscriptionHandle] (its exactly-once
+     * release flag, review N4, and its [TranscriptionHandle.cancel] seam, review §3), for
      * [releaseTranscription].
      */
-    private fun claimTranscription(): AtomicBoolean {
-        val clip = AtomicBoolean(false)
+    private fun claimTranscription(): TranscriptionHandle {
+        val handle = TranscriptionHandle()
+        activeHandles.add(handle)
         activeTranscriptions.incrementAndGet()
         recomputePhase()
-        return clip
+        return handle
     }
 
     /**
@@ -706,12 +758,29 @@ class DictationSession : Disposable {
      * counter can never be double-decremented; and a clip whose task never runs is still
      * released by its failed hand-off path, so the counter can never be stuck above zero and
      * the phase can always return to IDLE.
+     *
+     * Review §3: the clip's handle also leaves [activeHandles], so a later
+     * [cancelTranscription] cannot reach a clip that is no longer live.
      */
-    private fun releaseTranscription(clip: AtomicBoolean) {
-        if (clip.compareAndSet(false, true)) {
+    private fun releaseTranscription(handle: TranscriptionHandle) {
+        if (handle.releaseOnce()) {
             activeTranscriptions.decrementAndGet()
+            activeHandles.remove(handle)
             recomputePhase()
         }
+    }
+
+    /**
+     * Review §3: cancel every live transcription — running and queued — from anywhere (the
+     * status bar widget's click while TRANSCRIBING). Each live clip is reached through its
+     * [TranscriptionHandle]: a running clip's [ProgressIndicator] is cancelled (its
+     * `checkCanceled`/the engine unwind it), and a clip whose task has not started yet has
+     * [TranscriptionHandle.cancelRequested] set and bails the moment its task does start
+     * ([transcribeBody] checks it first) — so the engine never runs for a cancelled clip.
+     * A no-op when nothing is live.
+     */
+    fun cancelTranscription() {
+        activeHandles.forEach { it.cancel() }
     }
 
     /**
@@ -725,15 +794,25 @@ class DictationSession : Disposable {
      * queue runs this (the phase is TRANSCRIBING while the clip waits its turn, not only while
      * it runs) and released by the finally below, exactly once.
      *
+     * Review §3: [handle.cancelRequested] is checked before anything runs — a cancel that
+     * arrived while the clip was queued (before its task started, so its handle had no
+     * indicator to cancel) bails here, and the engine never runs for a cancelled clip.
+     *
      * Internal so the concurrency test can drive two clips directly, without a task queue.
      */
-    internal fun transcribeBody(indicator: ProgressIndicator, project: Project?, wavFile: File, clip: AtomicBoolean) {
+    internal fun transcribeBody(indicator: ProgressIndicator, project: Project?, wavFile: File, handle: TranscriptionHandle) {
         var locked = false
         try {
+            // Review §3: a cancel requested before this clip's task started surfaces here, at
+            // the very start — before model resolution or the engine call.
+            if (handle.cancelRequested) throw ProcessCanceledException()
             while (!transcriptionLock.tryLock()) {
                 // A Cancel pressed while the clip is queued surfaces here the moment it happens
-                // — we do not sit out the predecessor's inference to find out.
+                // — we do not sit out the predecessor's inference to find out. The handle flag
+                // covers cancels whose indicator the clip never saw (e.g. a task that has not
+                // started yet).
                 indicator.checkCanceled()
+                if (handle.cancelRequested) throw ProcessCanceledException()
                 Thread.sleep(TRANSCRIPTION_QUEUE_POLL_MS)
             }
             locked = true
@@ -803,7 +882,10 @@ class DictationSession : Disposable {
                     deliverTranscript?.invoke(project, text) ?: deliverToChat(project, text)
                 }
             } catch (t: Throwable) {
-                if (indicator.isCanceled) {
+                // A user cancel unwinds the engine as a throw (its checkCanceled, or a
+                // backend that surfaces the cancel): no error notification, just the log —
+                // the flag covers the case where the indicator never learned of the cancel.
+                if (indicator.isCanceled || handle.cancelRequested) {
                     log.info("transcription cancelled by user")
                 } else {
                     log.error("transcribe threw", t)
@@ -821,7 +903,7 @@ class DictationSession : Disposable {
             // the phase from the facts: IDLE only when the last clip is gone and nothing else
             // is live — an earlier clip ending first must not hide a live RECORDING or a later
             // TRANSCRIBING.
-            releaseTranscription(clip)
+            releaseTranscription(handle)
         }
     }
 

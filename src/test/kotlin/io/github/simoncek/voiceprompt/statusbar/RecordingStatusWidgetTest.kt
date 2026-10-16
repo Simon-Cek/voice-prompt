@@ -8,8 +8,9 @@ import org.junit.Test
 
 /**
  * Unit tests for the widget's pure decision functions (visibility and click routing). The
- * widget itself needs a live StatusBar, which is covered by manual sandbox verification.
- * These tests never touch the icon, so they run without an IntelliJ application.
+ * widget itself needs a live StatusBar, which is covered by the lifecycle test
+ * (RecordingStatusWidgetLifecycleTest). These tests never touch the icon, so they run
+ * without an IntelliJ application.
  */
 class RecordingStatusWidgetTest {
 
@@ -45,8 +46,8 @@ class RecordingStatusWidgetTest {
     }
 
     @Test
-    fun `click does nothing while transcribing`() {
-        assertEquals(RecordingStatusWidget.ClickAction.NONE, RecordingStatusWidget.clickAction(DictationPhase.TRANSCRIBING))
+    fun `click cancels the transcription while transcribing`() {
+        assertEquals(RecordingStatusWidget.ClickAction.CANCEL_TASK, RecordingStatusWidget.clickAction(DictationPhase.TRANSCRIBING))
     }
 
     @Test
