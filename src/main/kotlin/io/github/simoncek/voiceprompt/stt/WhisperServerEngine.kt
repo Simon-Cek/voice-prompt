@@ -701,12 +701,17 @@ object WhisperServerEngine {
     /** The server binary for this platform, or null when the platform bundle ships none. */
     internal fun serverBinary(): Path? = WhisperRuntime.serverPath()
 
-    /** Where the server's stdout/stderr go (one file, rewritten on each start). */
+    /**
+     * Where the server's stdout/stderr go (one file, rewritten on each start). Named per
+     * process (review N11): the home is shared across IDEs, so a single file would be truncated
+     * by whichever IDE starts its server last, and on Windows the concurrent writes can be a
+     * sharing violation.
+     */
     internal fun defaultLogFile(): File {
         // Under the shared home (review P6), next to the runtime it describes.
         val dir = VoicePromptPaths.baseDir()
         java.nio.file.Files.createDirectories(dir)
-        return File(dir.toFile(), "whisper-server.log")
+        return File(dir.toFile(), "whisper-server-${ProcessHandle.current().pid()}.log")
     }
 
     // --- argument + body construction (pure, unit-tested) ---

@@ -2,6 +2,7 @@ package io.github.simoncek.voiceprompt.stt
 
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.util.SystemInfo
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -14,10 +15,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * These used to live under [PathManager.getSystemPath], which is per IDE product *and* version —
  * so every IDE the user installed re-extracted the ~180 MB of runtime and model, and every
- * downloaded model (up to 1.6 GB) was duplicated per IDE. A single shared home
- * (`~/.voice-prompt`) means the second IDE finds the files already there; the one-time
- * migration moves what the current IDE already holds on first use, so nothing has to be
- * re-downloaded.
+ * downloaded model (up to 1.6 GB) was duplicated per IDE. A single shared home means the second
+ * IDE finds the files already there.
+ *
+ * The default home is per platform (review N11): `%LOCALAPPDATA%\VoicePrompt` on Windows
+ * (`%USERPROFILE%` can be roaming, redirected or synced there, and running DLLs/EXEs from it
+ * gets slowed by antivirus or blocked by AppLocker), `$XDG_DATA_HOME/voice-prompt`
+ * (or `~/.local/share/voice-prompt`) on Linux, and the historical `~/.voice-prompt` elsewhere.
+ * The `VOICE_PROMPT_HOME` environment variable overrides the default for a user or a corporate
+ * policy. The one-time migrations move what earlier versions already hold (the per-IDE system
+ * path, and the old `~/.voice-prompt` default) into the resolved home on first use, so nothing
+ * has to be re-downloaded.
  */
 object VoicePromptPaths {
 
@@ -25,6 +33,9 @@ object VoicePromptPaths {
 
     /** System property (review P6 test seam): full override of the home directory. */
     const val HOME_PROPERTY = "voiceprompt.home"
+
+    /** Environment variable (review N11): a user or corporate-policy override of the home. */
+    const val HOME_ENV = "VOICE_PROMPT_HOME"
 
     private val migrationStarted = AtomicBoolean(false)
 
@@ -34,17 +45,65 @@ object VoicePromptPaths {
      */
     internal var override: Path? = null
 
+    /** Test seam: a test JVM cannot set its own environment, so [baseDir] looks env vars up here. */
+    internal var getenv: (String) -> String? = { System.getenv(it) }
+
     /**
      * The shared home: [override] > the [HOME_PROPERTY] system property (the test suite points
-     * it at a build-local directory so tests never touch the real home) > `~/.voice-prompt`.
+     * it at a build-local directory so tests never touch the real home) > the [HOME_ENV]
+     * environment variable (review N11) > the platform default ([defaultHome]).
      */
     fun baseDir(): Path {
         override?.let { return it }
         System.getProperty(HOME_PROPERTY)?.let { return Paths.get(it) }
-        maybeStartMigration()
-        val home = System.getProperty("user.home")
-            ?: throw IOException("user.home is not set; cannot resolve the plugin home")
-        return Paths.get(home, ".voice-prompt")
+        getenv(HOME_ENV)?.takeIf { it.isNotBlank() }?.let { return Paths.get(it) }
+        val home = defaultHome(
+            isWindows = SystemInfo.isWindows,
+            isLinux = SystemInfo.isLinux,
+            userHome = System.getProperty("user.home"),
+            localAppData = getenv("LOCALAPPDATA"),
+            xdgDataHome = getenv("XDG_DATA_HOME"),
+        )
+        maybeStartMigration(home)
+        return home
+    }
+
+    /**
+     * The platform default home (review N11), as a pure function of the environment so the
+     * per-OS rules are testable on any runner:
+     * - Windows: `%LOCALAPPDATA%\VoicePrompt` — `%USERPROFILE%` can be roaming, redirected or
+     *   synced on corporate machines, and running DLLs/EXEs from it gets slowed by antivirus or
+     *   blocked by AppLocker;
+     * - Linux: `$XDG_DATA_HOME/voice-prompt`, or `~/.local/share/voice-prompt` when the XDG
+     *   variable is absent;
+     * - elsewhere (macOS): the historical `~/.voice-prompt` — no roaming concern there.
+     * Each branch falls back to `~/.voice-prompt` when its directory variable is missing.
+     */
+    internal fun defaultHome(
+        isWindows: Boolean,
+        isLinux: Boolean,
+        userHome: String?,
+        localAppData: String?,
+        xdgDataHome: String?,
+    ): Path {
+        // The historical location; also the fallback whenever the platform variable is missing.
+        fun dotDir(): Path = Paths.get(
+            userHome ?: throw IOException("user.home is not set; cannot resolve the plugin home"),
+            ".voice-prompt",
+        )
+        fun localShare(): Path = Paths.get(
+            userHome ?: throw IOException("user.home is not set; cannot resolve the plugin home"),
+            ".local", "share", "voice-prompt",
+        )
+        if (isWindows) {
+            return localAppData?.takeIf { it.isNotBlank() }?.let { Paths.get(it, "VoicePrompt") }
+                ?: dotDir()
+        }
+        if (isLinux) {
+            return xdgDataHome?.takeIf { it.isNotBlank() }?.let { Paths.get(it, "voice-prompt") }
+                ?: localShare()
+        }
+        return dotDir()
     }
 
     fun modelsDir(): Path = baseDir().resolve("models")
@@ -52,25 +111,31 @@ object VoicePromptPaths {
     fun runtimeDir(version: String, platformDir: String): Path =
         baseDir().resolve("runtime").resolve(version).resolve(platformDir)
 
-    // --- one-time migration from the legacy per-IDE location (review P6) ---
+    // --- one-time migrations from the legacy locations (review P6 per-IDE path, N11 shared home) ---
 
     /**
-     * Kicks off the one-time migration on a daemon thread: [baseDir] itself stays pure (path
-     * computation only) so it is safe on the EDT, and the file moves never run there. The
-     * migration and the normal install paths are mutually safe — both land complete files with
-     * an atomic move — so a dictation that starts before the migration finishes simply
-     * re-creates the file it needs (checksum-verified) and the migration keeps going.
+     * Kicks off the one-time migrations on a daemon thread: [baseDir] itself stays pure (path
+     * computation only) so it is safe on the EDT, and the file moves never run there. Two
+     * legacy locations feed the shared home (review N11): the per-IDE system path (P6) and the
+     * old cross-IDE `~/.voice-prompt` default that moved to the platform location. The
+     * migrations and the normal install paths are mutually safe — all land complete files with
+     * an atomic move — so a dictation that starts before they finish simply re-creates the file
+     * it needs (checksum-verified) and the migrations keep going.
      */
-    private fun maybeStartMigration() {
+    private fun maybeStartMigration(target: Path) {
         if (migrationStarted.get()) return
-        // Unavailable in a platform-less JVM (plain unit tests): no legacy location to migrate.
+        // Unavailable in a platform-less JVM (plain unit tests): no per-IDE location to migrate.
         // Checked before consuming the one-shot flag so a too-early call doesn't lose the chance.
-        val legacy = runCatching { Paths.get(PathManager.getSystemPath(), "copilot-voice") }.getOrNull()
-            ?: return
+        val legacyPerIde = runCatching { Paths.get(PathManager.getSystemPath(), "copilot-voice") }.getOrNull()
+        val legacyShared = System.getProperty("user.home")?.let { Paths.get(it, ".voice-prompt") }
+        val candidates = migrationCandidates(target, legacyPerIde, legacyShared)
+        if (candidates.isEmpty()) return
         if (!migrationStarted.compareAndSet(false, true)) return
         Thread({
-            runCatching { migrateFrom(legacy) }
-                .onFailure { LOG.warn("migration from the per-IDE system path failed; missing files will be recreated", it) }
+            candidates.forEach { legacy ->
+                runCatching { migrateFrom(legacy) }
+                    .onFailure { LOG.warn("migration from $legacy failed; missing files will be recreated", it) }
+            }
         }, "voice-prompt-migration").apply {
             isDaemon = true
             start()
@@ -78,9 +143,24 @@ object VoicePromptPaths {
     }
 
     /**
-     * Moves the models and the runtime from the legacy per-IDE base [legacy]
-     * (`<IDE system path>/copilot-voice`) into the shared home. Best effort: each failure is
-     * logged, and the normal extract/download path recreates anything that did not move.
+     * Pure (review N11): the legacy locations to migrate from, in order. The target itself is
+     * never a source — on macOS the resolved home IS the historical `~/.voice-prompt`, and
+     * migrating a directory into itself would delete it.
+     */
+    internal fun migrationCandidates(target: Path, legacyPerIde: Path?, legacyShared: Path?): List<Path> {
+        val candidates = mutableListOf<Path>()
+        if (legacyPerIde != null && legacyPerIde != target) candidates.add(legacyPerIde)
+        if (legacyShared != null && legacyShared != target && legacyShared != legacyPerIde) {
+            candidates.add(legacyShared)
+        }
+        return candidates
+    }
+
+    /**
+     * Moves the models and the runtime from a legacy base [legacy] — the per-IDE
+     * `<IDE system path>/copilot-voice` (P6) or the old cross-IDE `~/.voice-prompt` default
+     * (N11) — into the shared home. Best effort: each failure is logged, and the normal
+     * extract/download path recreates anything that did not move.
      * Exposed (internal) so the migration is testable without a platform.
      */
     internal fun migrateFrom(legacy: Path) {

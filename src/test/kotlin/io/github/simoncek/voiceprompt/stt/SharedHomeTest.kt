@@ -1,5 +1,6 @@
 package io.github.simoncek.voiceprompt.stt
 
+import com.intellij.openapi.util.SystemInfo
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,8 +9,10 @@ import org.junit.Assert.fail
 import org.junit.Assume
 import org.junit.Before
 import org.junit.Test
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -94,6 +97,156 @@ class VoicePromptPathsTest {
 
         assertTrue("an interrupted download part is not a finished model; it stays", Files.exists(part))
         assertFalse("nothing may appear in the shared models dir", Files.exists(home.resolve("models")))
+    }
+
+    // --- review N11: the platform default home, the env override, the legacy-shared-home sources ---
+
+    @Test
+    fun `on windows the home is LOCALAPPDATA with the dot dir as fallback`() {
+        assertEquals(
+            Paths.get("/lad", "VoicePrompt"),
+            VoicePromptPaths.defaultHome(true, false, "/u", "/lad", null),
+        )
+        assertEquals(
+            Paths.get("/u", ".voice-prompt"),
+            VoicePromptPaths.defaultHome(true, false, "/u", null, null),
+        )
+        assertEquals(
+            Paths.get("/u", ".voice-prompt"),
+            VoicePromptPaths.defaultHome(true, false, "/u", "  ", null),
+        )
+    }
+
+    @Test
+    fun `on linux the home is XDG_DATA_HOME with the local share default`() {
+        assertEquals(
+            Paths.get("/xdg", "voice-prompt"),
+            VoicePromptPaths.defaultHome(false, true, "/u", null, "/xdg"),
+        )
+        assertEquals(
+            Paths.get("/u", ".local", "share", "voice-prompt"),
+            VoicePromptPaths.defaultHome(false, true, "/u", null, null),
+        )
+        assertEquals(
+            Paths.get("/u", ".local", "share", "voice-prompt"),
+            VoicePromptPaths.defaultHome(false, true, "/u", null, ""),
+        )
+    }
+
+    @Test
+    fun `elsewhere the historical dot dir is kept`() {
+        assertEquals(
+            Paths.get("/u", ".voice-prompt"),
+            VoicePromptPaths.defaultHome(false, false, "/u", "/lad", "/xdg"),
+        )
+    }
+
+    @Test
+    fun `without a user home the fallback cannot be resolved`() {
+        try {
+            VoicePromptPaths.defaultHome(true, false, null, null, null)
+            fail("user.home is required for the ~/.voice-prompt fallback")
+        } catch (expected: IOException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `the VOICE_PROMPT_HOME environment variable overrides the platform default`() {
+        val savedProperty = System.getProperty(VoicePromptPaths.HOME_PROPERTY)
+        val savedOverride = VoicePromptPaths.override
+        val savedGetenv = VoicePromptPaths.getenv
+        System.clearProperty(VoicePromptPaths.HOME_PROPERTY)
+        VoicePromptPaths.override = null
+        VoicePromptPaths.getenv = { name ->
+            when (name) {
+                VoicePromptPaths.HOME_ENV -> "/corp/home"
+                else -> null
+            }
+        }
+        try {
+            assertEquals(Paths.get("/corp/home"), VoicePromptPaths.baseDir())
+        } finally {
+            VoicePromptPaths.getenv = savedGetenv
+            VoicePromptPaths.override = savedOverride
+            if (savedProperty != null) System.setProperty(VoicePromptPaths.HOME_PROPERTY, savedProperty)
+        }
+    }
+
+    @Test
+    fun `the system property still beats the environment variable`() {
+        val savedOverride = VoicePromptPaths.override
+        val savedGetenv = VoicePromptPaths.getenv
+        VoicePromptPaths.override = null
+        VoicePromptPaths.getenv = { name ->
+            when (name) {
+                VoicePromptPaths.HOME_ENV -> "/corp/home"
+                else -> null
+            }
+        }
+        try {
+            // The test suite points the property at a build-local dir (build.gradle.kts); it wins.
+            val expected = Paths.get(System.getProperty(VoicePromptPaths.HOME_PROPERTY)!!)
+            assertEquals(expected, VoicePromptPaths.baseDir())
+        } finally {
+            VoicePromptPaths.getenv = savedGetenv
+            VoicePromptPaths.override = savedOverride
+        }
+    }
+
+    @Test
+    fun `the platform default branch of baseDir follows the per-OS rules`() {
+        val savedUserHome = System.getProperty("user.home")
+        val savedProperty = System.getProperty(VoicePromptPaths.HOME_PROPERTY)
+        val savedOverride = VoicePromptPaths.override
+        val savedGetenv = VoicePromptPaths.getenv
+        // Redirect user.home so the legacy-shared-home migration source (user.home/.voice-prompt)
+        // is a non-existent dir — the daemon migration must not touch the developer's real home.
+        System.setProperty("user.home", Files.createTempDirectory("vp-fake-user").toString())
+        System.clearProperty(VoicePromptPaths.HOME_PROPERTY)
+        VoicePromptPaths.override = null
+        VoicePromptPaths.getenv = { name ->
+            when (name) {
+                "LOCALAPPDATA" -> "/lad"
+                "XDG_DATA_HOME" -> "/xdg"
+                else -> null
+            }
+        }
+        try {
+            val expected = VoicePromptPaths.defaultHome(
+                SystemInfo.isWindows,
+                SystemInfo.isLinux,
+                "/u", "/lad", "/xdg",
+            )
+            assertEquals(expected, VoicePromptPaths.baseDir())
+        } finally {
+            VoicePromptPaths.getenv = savedGetenv
+            VoicePromptPaths.override = savedOverride
+            System.setProperty("user.home", savedUserHome)
+            if (savedProperty != null) System.setProperty(VoicePromptPaths.HOME_PROPERTY, savedProperty)
+        }
+    }
+
+    @Test
+    fun `migration candidates exclude the target and duplicates`() {
+        val target = Paths.get("/home", "VoicePrompt")
+        val perIde = Paths.get("/system", "copilot-voice")
+        val shared = Paths.get("/u", ".voice-prompt")
+
+        assertEquals(
+            listOf(perIde, shared),
+            VoicePromptPaths.migrationCandidates(target, perIde, shared),
+        )
+        // macOS: the resolved home IS the historical shared dir — it must not be a source of itself.
+        assertEquals(
+            listOf(perIde),
+            VoicePromptPaths.migrationCandidates(shared, perIde, shared),
+        )
+        assertEquals(
+            listOf(shared),
+            VoicePromptPaths.migrationCandidates(Paths.get("/new", "home"), null, shared),
+        )
+        assertEquals(emptyList<Path>(), VoicePromptPaths.migrationCandidates(target, null, null))
     }
 }
 
