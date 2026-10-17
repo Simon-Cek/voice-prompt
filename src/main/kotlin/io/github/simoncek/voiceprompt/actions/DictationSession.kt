@@ -597,8 +597,10 @@ class DictationSession : Disposable {
         // ([releaseTranscription]).
         val handle = claimTranscription()
         try {
-            val wavFile = File(System.getProperty("java.io.tmpdir"), "copilot-voice-${System.currentTimeMillis()}.wav")
-            WavFile.write(wavFile, samples, AudioCapture.DEFAULT_FORMAT)
+            // Pre-1.1.0 finding 5: createTempFile gives an atomically unique, owner-only
+            // file — the old `copilot-voice-<millis>.wav` name could collide (two rapid
+            // clips, or a leftover) and the CREATE open would have failed the whole clip.
+            val wavFile = WavFile.write(samples, AudioCapture.DEFAULT_FORMAT)
             transcribeInBackground(target, wavFile, handle)
         } catch (t: Exception) {
             // Review N4: the WAV write failed after the claim — release the clip here, or the

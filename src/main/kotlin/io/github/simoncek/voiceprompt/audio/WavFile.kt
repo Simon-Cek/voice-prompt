@@ -1,5 +1,6 @@
 package io.github.simoncek.voiceprompt.audio
 
+import java.nio.channels.SeekableByteChannel
 import javax.sound.sampled.AudioFormat
 import java.io.File
 import java.nio.ByteBuffer
@@ -13,7 +14,30 @@ import java.util.EnumSet
 object WavFile {
 
     /**
-     * Writes the clip to [file], which must not exist yet.
+     * Writes the clip to a fresh temp file and returns it.
+     *
+     * The name comes from [Files.createTempFile], which is atomic: two rapid clips — or two
+     * IDE instances — can never land on the same file. The old caller-chosen
+     * `copilot-voice-<millis>.wav` name could, and a collision failed the whole clip (the
+     * CREATE open below refuses an existing file). The file is created read/write for the
+     * owner only (Javadoc guarantee, regardless of umask): the WAV holds the user's raw
+     * voice and sits in a shared temp dir until the session's post-inference delete.
+     */
+    fun write(samples: ShortArray, format: AudioFormat): File {
+        require(format.encoding == AudioFormat.Encoding.PCM_SIGNED) { "Expected PCM_SIGNED, got ${format.encoding}" }
+        // createTempFile: unique name + owner-only perms at creation.
+        val path = Files.createTempFile("copilot-voice-", ".wav")
+        Files.newByteChannel(path, EnumSet.of(StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)).use { out ->
+            writeTo(out, samples, format)
+        }
+        // JDK 25 removed the File(Path) constructor — go through the path string.
+        return File(path.toString())
+    }
+
+    /**
+     * Writes the clip to [file], which must not exist yet — the fixture form for callers
+     * that need a deterministic path (the test-suite WAVs). Production clips go through
+     * [write], which picks a unique temp name instead.
      *
      * The WAV holds the user's raw voice, and it lives in a shared temp dir between creation
      * and the session's post-inference delete, so on POSIX it is created owner-only (0600)
@@ -25,8 +49,6 @@ object WavFile {
      */
     fun write(file: File, samples: ShortArray, format: AudioFormat) {
         require(format.encoding == AudioFormat.Encoding.PCM_SIGNED) { "Expected PCM_SIGNED, got ${format.encoding}" }
-        val payload = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-        for (sample in samples) payload.putShort(sample)
         val path = file.toPath()
         val attrs = if (path.fileSystem.supportedFileAttributeViews().contains("posix")) {
             arrayOf<FileAttribute<*>>(PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
@@ -34,9 +56,15 @@ object WavFile {
             emptyArray()
         }
         Files.newByteChannel(path, EnumSet.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE), *attrs).use { out ->
-            out.write(ByteBuffer.wrap(header(format, payload.position())))
-            out.write(ByteBuffer.wrap(payload.array()))
+            writeTo(out, samples, format)
         }
+    }
+
+    private fun writeTo(out: SeekableByteChannel, samples: ShortArray, format: AudioFormat) {
+        val payload = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+        for (sample in samples) payload.putShort(sample)
+        out.write(ByteBuffer.wrap(header(format, payload.position())))
+        out.write(ByteBuffer.wrap(payload.array()))
     }
 
     private fun header(format: AudioFormat, dataSize: Int): ByteArray {
