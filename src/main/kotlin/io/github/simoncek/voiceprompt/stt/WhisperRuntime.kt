@@ -117,6 +117,14 @@ object WhisperRuntime {
     private fun allPresent(target: Path, sums: Map<String, String>): Boolean =
         sums.keys.all { Files.isRegularFile(target.resolve(it)) }
 
+    /**
+     * The pinned whisper.cpp build (e.g. `b5454`); it also keys the runtime dir
+     * (`<home>/runtime/<version>/<platform>`), so changing it orphans every user's extracted runtime.
+     *
+     * Verified (Hyg): `b5454` and `v1.9.5` are two tags of the *same* upstream whisper.cpp release
+     * (both published 2026-10-06), and the bundled `libwhisper.so.1.9.5` soname reports the latter.
+     * The pin is therefore correct as-is — do not "fix" it to the soname.
+     */
     private fun readVersion(): String =
         javaClass.classLoader.getResource("whisper/WHISPER_VERSION.txt")?.let { url ->
             url.openStream().use { it.readBytes() }.decodeToString().trim()
