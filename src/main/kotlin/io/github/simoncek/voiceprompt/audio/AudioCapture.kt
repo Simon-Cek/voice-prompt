@@ -164,7 +164,10 @@ class AudioCapture(
             }
             buffer.reset()
             sampleState = AWAITING
+            // Mic timing log (review #11, start delay): numbers only — the line.start() phase.
+            val startPhaseBeginMs = System.currentTimeMillis()
             dataLine.start()
+            log.debug("capture line started: ${System.currentTimeMillis() - startPhaseBeginMs} ms")
         } catch (t: Throwable) {
             runCatching { dataLine.close() }
             if (line === dataLine) line = null
@@ -277,11 +280,12 @@ class AudioCapture(
                 return OpenedLine(cached, reused = true)
             }
             try {
+                val openBeginMs = System.currentTimeMillis()
                 cached.open(format, bufferBytes)
-                // Review N7: numbers only — lets us see whether a driver rounds or ignores the
-                // requested buffer size.
-                log.debug("kept line re-opened: requested buffer ${bufferBytes} bytes, " +
-                    "driver reports ${cached.bufferSize} bytes")
+                // Review N7 + the mic timing log (review #11, start delay): numbers only —
+                // the open phase, and whether a driver rounds or ignores the buffer size.
+                log.debug("kept line re-opened: open ${System.currentTimeMillis() - openBeginMs} ms, " +
+                    "requested buffer ${bufferBytes} bytes, driver reports ${cached.bufferSize} bytes")
                 return OpenedLine(cached, reused = true)
             } catch (t: Throwable) {
                 // The device went away (unplugged?) or the driver wedged: drop the cache and
@@ -298,11 +302,12 @@ class AudioCapture(
     private fun resolveFreshLine(mixerName: String?): TargetDataLine {
         val factory = lineFactoryForTest
         val dataLine = if (factory != null) factory(mixerName, format) else MicrophoneResolver.resolve(mixerName, format)
+        val openBeginMs = System.currentTimeMillis()
         dataLine.open(format, bufferBytes)
-        // Review N7: numbers only — lets us see whether a driver rounds or ignores the
-        // requested buffer size.
-        log.debug("capture line opened: requested buffer ${bufferBytes} bytes, " +
-            "driver reports ${dataLine.bufferSize} bytes")
+        // Review N7 + the mic timing log (review #11, start delay): numbers only — the open
+        // phase duration, and whether a driver rounds or ignores the requested buffer size.
+        log.debug("capture line opened: open ${System.currentTimeMillis() - openBeginMs} ms, " +
+            "requested buffer ${bufferBytes} bytes, driver reports ${dataLine.bufferSize} bytes")
         line = dataLine
         lineDevice = mixerName
         return dataLine

@@ -181,8 +181,9 @@ class AudioCaptureFlushTest {
  * buffer; [stop] retains it (that is the whole of the N5 bug); only [flush] discards it.
  * [read] never blocks — it returns what is buffered or reports underflow (-1) — so the
  * tests have no timing dependence beyond [AudioCapture.awaitFirstSample]'s bounded wait.
+ * [internal] (not private) so [MicTimingLogTest] drives the same fake.
  */
-private class FakeTargetDataLine(
+internal class FakeTargetDataLine(
     private val noOpFlush: Boolean = false,
     private val flushFailure: Throwable? = null,
 ) : TargetDataLine {
