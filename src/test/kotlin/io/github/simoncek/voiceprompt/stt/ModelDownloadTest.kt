@@ -202,6 +202,45 @@ class ModelDownloadTest : LightPlatformTestCase() {
         assertFalse(Files.exists(dir!!.resolve("ggml-base.en.bin.part")))
         assertEquals("cancellation happens before any network I/O", 0, srv.requests.size)
     }
+
+    fun test_a_cancelled_download_keeps_its_part_so_the_retry_resumes() {
+        val payload = ByteArray(512 * 1024) { (it % 251).toByte() }
+        val srv = startServer(payload)
+        srv.chunkDelayMs = 150 // release the body slowly so the cancel lands mid-stream
+        ModelManager.sha256ForTest = { sha256Of(payload) }
+        val indicator = FakeIndicator()
+        val part = dir!!.resolve("ggml-base.en.bin.part")
+
+        // Start the download on its own thread; once some (but not all) bytes have landed in the
+        // part, cancel it — the mid-stream cancel the old blanket `finally` used to throw away.
+        val executor = Executors.newSingleThreadExecutor()
+        val future = executor.submit { ModelManager.download("base.en", indicator) }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            if (Files.exists(part) && Files.size(part) > 0 && Files.size(part) < payload.size) break
+            Thread.sleep(5)
+        }
+        indicator.canceled = true
+        val error = runCatching { future.get(15, TimeUnit.SECONDS) }.exceptionOrNull()
+        executor.shutdownNow()
+
+        assertTrue(
+            "a mid-stream cancel must surface as a cancellation, got: $error",
+            error is ProcessCanceledException || error?.cause is ProcessCanceledException,
+        )
+        assertTrue("a cancelled download must KEEP its partial .part (for resume)", Files.exists(part))
+        val partSize = Files.size(part)
+        assertTrue("the part must be a proper prefix (0 < part < full)", partSize > 0 && partSize < payload.size)
+        assertFalse("a cancelled download must not install the target", Files.exists(dir!!.resolve("ggml-base.en.bin")))
+
+        // The retry resumes exactly where the cancel stopped — a Range request from the kept part.
+        val target = downloadInThread("base.en", FakeIndicator())
+        assertArrayEquals("the resumed download must produce the exact payload", payload, Files.readAllBytes(target))
+        assertEquals(
+            "the retry must resume with a Range from the kept part",
+            "bytes=$partSize-", srv.requests.last().rangeHeader,
+        )
+    }
 }
 
 /**
@@ -220,6 +259,14 @@ private class RangeServer(private val payload: ByteArray) : AutoCloseable {
     @Volatile
     var ignoreRange = false
 
+    /**
+     * When > 0 the body is released in 64 KB chunks, pausing this many ms between them, so a
+     * test can cancel the client mid-stream (an in-memory body would otherwise be read to the
+     * end before the cancel is noticed). 0 (the default) writes the whole body at once.
+     */
+    @Volatile
+    var chunkDelayMs = 0
+
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     val port: Int = server.address.port
 
@@ -232,7 +279,24 @@ private class RangeServer(private val payload: ByteArray) : AutoCloseable {
                 exchange.responseHeaders.add("Content-Length", body.size.toString())
                 if (code == 206) exchange.responseHeaders.add("Content-Range", "bytes $from-$to/${payload.size}")
                 exchange.sendResponseHeaders(code, body.size.toLong())
-                exchange.responseBody.use { it.write(body) }
+                exchange.responseBody.use { out ->
+                    if (chunkDelayMs > 0) {
+                        // Release in 64 KB chunks with a pause, so the client's read loop
+                        // (and its per-iteration cancel check) progresses slowly enough for a
+                        // test to land a cancel mid-stream.
+                        val chunk = 64 * 1024
+                        var offset = 0
+                        while (offset < body.size) {
+                            val n = minOf(chunk, body.size - offset)
+                            out.write(body, offset, n)
+                            out.flush()
+                            offset += n
+                            Thread.sleep(chunkDelayMs.toLong())
+                        }
+                    } else {
+                        out.write(body)
+                    }
+                }
             }
             val start = range?.removePrefix("bytes=")?.substringBefore('-')?.toIntOrNull() ?: 0
             when {
@@ -252,6 +316,8 @@ private class RangeServer(private val payload: ByteArray) : AutoCloseable {
 /** A minimal cancellable [ProgressIndicator] for driving [ModelManager.download] in tests. */
 private class FakeIndicator : ProgressIndicator {
 
+    /** @Volatile: a test may flip this from another thread mid-download. */
+    @Volatile
     var canceled = false
     private var fractionValue: Double = 0.0
     private var textValue: String? = null

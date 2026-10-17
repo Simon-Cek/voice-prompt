@@ -131,7 +131,9 @@ object ModelManager {
      * - fail-closed: without a checksum in the bundled manifest the download is refused before a
      *   single byte is transferred, instead of verifying size only;
      * - resumable: a deterministic `.part` name plus an HTTP `Range` request, so a failed 1.6 GB
-     *   download continues where it stopped instead of restarting from zero;
+     *   download continues where it stopped instead of restarting from zero — a cancelled or
+     *   interrupted download keeps its partial `.part` (deleted only on a checksum mismatch or
+     *   when the server rejects the range);
      * - concurrency-safe: a cross-process lock guards the shared part file, so two IDEs of the
      *   same version downloading the same model serialize instead of corrupting each other
      *   (the lock is an OS file lock — a crashed IDE releases it, so it can never wedge);
@@ -158,21 +160,24 @@ object ModelManager {
             // (review P6) means the target can already be here.
             if (Files.isRegularFile(target)) return target
             val part = dir.resolve(target.fileName.toString() + ".part")
-            try {
-                downloadInto(part, urlFor(modelId), indicator, onPercent)
-                // Verify integrity before moving the file into place: a truncated or corrupted
-                // model would otherwise fail later, during transcription, with no hint of why.
-                val actual = WhisperRuntime.sha256(part)
-                if (actual != expected) {
-                    throw IOException("Checksum mismatch for model $modelId: expected $expected, got $actual")
-                }
-                LOG.info("Model $modelId verified: size=${Files.size(part)} sha256=$actual")
-                Files.move(part, target, StandardCopyOption.REPLACE_EXISTING)
-                return target
-            } finally {
-                // Idempotent: after a successful move the part is already gone.
+            downloadInto(part, urlFor(modelId), indicator, onPercent)
+            // Verify integrity before moving the file into place: a truncated or corrupted
+            // model would otherwise fail later, during transcription, with no hint of why.
+            val actual = WhisperRuntime.sha256(part)
+            if (actual != expected) {
+                // Pre-1.1.0 finding 2: the whole file is here and it is the wrong bytes —
+                // resuming from it would just re-fail, so delete it. (A server that rejects
+                // our Range already deleted and retried on its own, inside downloadInto.)
+                // A Cancel or a network failure throws before we reach this check, and the
+                // partial .part is still a valid prefix of the file (we write bytes
+                // sequentially) — keep it, so the next attempt resumes where this one stopped
+                // instead of restarting a 1.6 GB download from zero.
                 Files.deleteIfExists(part)
+                throw IOException("Checksum mismatch for model $modelId: expected $expected, got $actual")
             }
+            LOG.info("Model $modelId verified: size=${Files.size(part)} sha256=$actual")
+            Files.move(part, target, StandardCopyOption.REPLACE_EXISTING)
+            return target
         } finally {
             channel.close()
         }
