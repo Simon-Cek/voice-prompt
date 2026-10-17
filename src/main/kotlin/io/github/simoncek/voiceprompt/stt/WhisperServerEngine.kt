@@ -124,16 +124,39 @@ object WhisperServerEngine {
     @Volatile
     private var lastStartupFailure = 0L
 
+    /**
+     * Pre-1.1.0 finding 3: the user config (model + processing key) the [consecutiveStartupFailures]
+     * count applies to. Two consecutive startup failures for a config disable the server for the
+     * session (CLI fallback); a model or processing change — or a successful start — clears both.
+     */
+    @Volatile
+    private var failureScope: String? = null
+
+    /** Pre-1.1.0 finding 3: consecutive startup failures for [failureScope] (see [serverDisabled]). */
+    @Volatile
+    private var consecutiveStartupFailures = 0
+
     /** Review N8 #7: the /health wait bound (default [STARTUP_TIMEOUT_MS]); tests override it. */
     internal var startupTimeoutMsForTest: Long? = null
     private val startupTimeoutMs: Long get() = startupTimeoutMsForTest ?: STARTUP_TIMEOUT_MS
+
+    /** Pre-1.1.0 finding 3: the startup backoff window (default [STARTUP_BACKOFF_MS]); tests override it. */
+    internal var startupBackoffMsForTest: Long? = null
+    private val startupBackoffMs: Long get() = startupBackoffMsForTest ?: STARTUP_BACKOFF_MS
 
     // Review N13: created on first use, not on object init — [shutdown] (called from
     // DictationSession.dispose on every unload, including CLI-only ones) checks isInitialized()
     // without touching the values, so a plugin that never used the long-lived server creates no
     // HttpClient and no reaper thread at all.
     private val clientLazy: Lazy<HttpClient> = lazy {
-        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
+        HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            // Pre-1.1.0 finding 3: the server lives on 127.0.0.1 — a machine/IDE proxy must never
+            // sit in between (on corporate Windows that is exactly how loopback traffic dies).
+            // Builder.NO_PROXY is the platform's "direct connection, no proxy" selector
+            // (the spec's ProxySelector.of(null)).
+            .proxy(HttpClient.Builder.NO_PROXY)
+            .build()
     }
 
     private val client: HttpClient get() = clientLazy.value
@@ -203,7 +226,26 @@ object WhisperServerEngine {
         // fail-and-restart dance happens once, not on every utterance.
         val gpu = useGpu && !GpuHealth.isBlacklisted(model, key)
         val serverKey = ServerKey(model, gpu, threads)
-        if (serverBinary != null && !inStartupBackoff()) {
+        // Pre-1.1.0 finding 3: the startup-failure count is scoped to the user's config (model +
+        // processing). A model or processing change clears it — the new config gets a fresh
+        // allowance — and [MAX_CONSECUTIVE_STARTUP_FAILURES] failures in a row disable the server
+        // for the session: dictations fall back to whisper-cli and no more start is attempted,
+        // instead of re-paying the startup wait (up to a minute) on every dictation.
+        val scope = scopeOf(model, key)
+        synchronized(LOCK) {
+            if (failureScope != null && failureScope != scope) {
+                failureScope = null
+                consecutiveStartupFailures = 0
+            }
+        }
+        val disabled = serverDisabled(scope)
+        if (disabled) {
+            log.info(
+                "whisper-server disabled for this session after $MAX_CONSECUTIVE_STARTUP_FAILURES " +
+                    "consecutive startup failures (config: $scope); using whisper-cli",
+            )
+        }
+        if (serverBinary != null && !inStartupBackoff() && !disabled) {
             val active = try {
                 ensureRunning(serverKey, serverBinary, logFile, indicator)
             } catch (e: GpuStartupDeath) {
@@ -229,6 +271,7 @@ object WhisperServerEngine {
                 try {
                     val raw = request(active, wavFile, language, timeoutMs, indicator)
                     lastUsed = System.currentTimeMillis()
+                    resetFailures()
                     return WhisperCliEngine().normalizeTranscript(raw)
                 } catch (e: ProcessCanceledException) {
                     // Review N9: cancel — keep the warm server. The in-flight inference dies with
@@ -255,7 +298,14 @@ object WhisperServerEngine {
                             active, t, model, threads, key, serverBinary, logFile, indicator,
                             wavFile, language, timeoutMs,
                         )
-                        if (cpuText != null) return cpuText
+                        if (cpuText != null) {
+                            resetFailures()
+                            return cpuText
+                        }
+                        // Pre-1.1.0 finding 3: the server was published but never worked for this
+                        // utterance (died on startup, timeout, …) — count it as a startup failure
+                        // for this config.
+                        markStartupFailure(scope)
                         if (!allowFallback) {
                             log.warn("whisper-server request failed; rethrowing (fallback disabled)", t)
                             throw t
@@ -264,8 +314,13 @@ object WhisperServerEngine {
                         log.warn("whisper-server request failed; falling back to whisper-cli", t)
                     }
                 }
-            } else if (!allowFallback) {
-                throw IllegalStateException("whisper-server did not start (log: ${logFile.absolutePath})")
+            } else {
+                // Pre-1.1.0 finding 3: the server did not come up for this utterance — count it as
+                // a startup failure for this config (two in a row disable the server for the session).
+                markStartupFailure(scope)
+                if (!allowFallback) {
+                    throw IllegalStateException("whisper-server did not start (log: ${logFile.absolutePath})")
+                }
             }
         } else if (!allowFallback) {
             throw IllegalStateException("no whisper-server available for this platform (log: ${logFile.absolutePath})")
@@ -500,7 +555,10 @@ object WhisperServerEngine {
      * published, an unpublished process is always killed, and the backoff is marked only on a
      * REAL failure — a cancel or a shutdown never sets it (review N8 #2), and neither does a
      * GPU-keyed startup DEATH: that is a GPU-failure candidate the caller may retry on the CPU
-     * key (review N9 #2), not a general startup failure.
+     * key (review N9 #2), not a general startup failure. The session-disable counting
+     * (pre-1.1.0 finding 3) happens in [transcribeInternal] instead — it sees every way the
+     * server path can fail to produce a result, including a server that dies right after
+     * publishing.
      */
     private fun resolveStart(
         starter: Starting,
@@ -524,7 +582,6 @@ object WhisperServerEngine {
                         // caller tries the CPU key); surface it for that decision.
                         "gpu-died"
                     } else {
-                        markStartupFailure()
                         "failed"
                     }
                 }
@@ -672,7 +729,10 @@ object WhisperServerEngine {
         oldProcess?.let { stopProcess(it) }
         inFlight?.process?.let { it.destroyForcibly() }
         startupTimeoutMsForTest = null
+        startupBackoffMsForTest = null
         lastStartupFailure = 0L
+        failureScope = null
+        consecutiveStartupFailures = 0
     }
 
     private fun stopProcess(process: java.lang.Process) {
@@ -692,11 +752,41 @@ object WhisperServerEngine {
     }
 
     private fun inStartupBackoff(): Boolean =
-        System.currentTimeMillis() - lastStartupFailure < STARTUP_BACKOFF_MS
+        System.currentTimeMillis() - lastStartupFailure < startupBackoffMs
 
-    private fun markStartupFailure() {
-        lastStartupFailure = System.currentTimeMillis()
+    /** Pre-1.1.0 finding 3: the user config (model + processing key) a startup-failure count applies to. */
+    private fun scopeOf(model: Path, processingKey: String): String = "$model|$processingKey"
+
+    /**
+     * Pre-1.1.0 finding 3: one more utterance where the server path failed to produce a result
+     * (did not start, or was published but never worked) counts for the user's config; a
+     * different config starts fresh at one. Two in a row disable the server for the session.
+     */
+    private fun markStartupFailure(scope: String) {
+        synchronized(LOCK) {
+            if (scope != failureScope) {
+                failureScope = scope
+                consecutiveStartupFailures = 1
+            } else {
+                consecutiveStartupFailures++
+            }
+            lastStartupFailure = System.currentTimeMillis()
+        }
     }
+
+    /** Pre-1.1.0 finding 3: the server produced a result — the failure episode is over. */
+    private fun resetFailures() {
+        synchronized(LOCK) {
+            failureScope = null
+            consecutiveStartupFailures = 0
+        }
+    }
+
+    /** Pre-1.1.0 finding 3: true once [scope] has failed to start [MAX_CONSECUTIVE_STARTUP_FAILURES] times in a row. */
+    private fun serverDisabled(scope: String): Boolean =
+        synchronized(LOCK) {
+            failureScope == scope && consecutiveStartupFailures >= MAX_CONSECUTIVE_STARTUP_FAILURES
+        }
 
     private fun freePort(): Int {
         // Bind nothing: we only ask the OS for a free port, then hand it to the server (127.0.0.1).
@@ -810,4 +900,7 @@ object WhisperServerEngine {
     private const val IDLE_CHECK_PERIOD_MS = 30_000L
     /** After a failed startup, don't hammer the start button on every dictation for a bit. */
     private const val STARTUP_BACKOFF_MS = 30_000L
+
+    /** Pre-1.1.0 finding 3: this many consecutive startup failures disable the server for the session. */
+    private const val MAX_CONSECUTIVE_STARTUP_FAILURES = 2
 }
