@@ -25,8 +25,8 @@ a standard Windows shell (PowerShell or cmd). The `bin/*.sh` scripts in the repo
 ## 1. Get the code (and verify the identity!)
 
 ```bat
-git clone https://github.com/Simon-Cek/copilot-voice-to-text.git
-cd copilot-voice-to-text
+git clone https://github.com/Simon-Cek/voice-prompt.git
+cd voice-prompt
 git checkout main
 git pull
 ```
