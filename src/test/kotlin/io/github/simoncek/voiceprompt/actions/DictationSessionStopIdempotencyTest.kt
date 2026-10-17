@@ -127,6 +127,42 @@ class DictationSessionStopIdempotencyTest : LightPlatformTestCase() {
         }
     }
 
+    fun test_a_cancelled_start_cannot_leave_the_phase_on_recording() {
+        val status = DictationStatus.instance
+        // Pre-1.1.0 finding 6: startInternal has just confirmed the audio (audioConfirmed =
+        // true), and a stop() that landed in that window has already won: it cancelled the
+        // start and queued the teardown (captured — not run, so its own clear has not
+        // happened yet either).
+        s.setStartingForTest(true)
+        s.setAudioConfirmedForTest(true)
+        var queued: (() -> Unit)? = null
+        s.stopWorkDispatcher = { queued = it }
+        try {
+            s.stop()
+            assertTrue(
+                "a stop in that window must cancel the in-progress start (review N2)",
+                s.isStartCancelledForTest(),
+            )
+            assertNotNull("the teardown must be queued", queued)
+            // Now the start sequence ends — the finally both dispatch paths share. Without the
+            // fix it recomputes from the stale audioConfirmed=true and derives RECORDING for
+            // a session that is already torn down: the widget sits on "Recording" until the
+            // next event.
+            s.endStartSequenceForTest()
+            PlatformTestUtil.waitWithEventsDispatching(
+                "a cancelled start must not leave the phase on RECORDING (finding 6)",
+                { status.phase == DictationPhase.IDLE },
+                10,
+            )
+        } finally {
+            s.stopWorkDispatcher = null
+            s.setStartingForTest(false)
+            s.setAudioConfirmedForTest(false)
+            status.applyDerivedPhase { DerivedPhase(DictationPhase.IDLE) }
+            PlatformTestUtil.waitWithEventsDispatching("cleanup", { status.phase == DictationPhase.IDLE }, 10)
+        }
+    }
+
     fun test_a_key_release_after_max_duration_stop_dispatches_one_teardown() {
         val originalMode = CopilotVoiceSettings.instance.mode
         CopilotVoiceSettings.instance.mode = RecordingMode.HOLD

@@ -366,21 +366,36 @@ class DictationSession : Disposable {
             try {
                 startInternal(project)
             } finally {
-                // Review N4: only this outermost finally clears [starting] and recomputes —
-                // the branches inside [startInternal] never do, so a new session cannot claim
-                // [starting] in the gap and have this finally stomp it (which would also break
-                // the N2 stop-during-start decision, which reads [starting] under [sessionLock]).
-                starting.set(false)
-                recomputePhase()
+                endStartSequence()
             }
         } ?: ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 startInternal(project)
             } finally {
-                starting.set(false)
-                recomputePhase()
+                endStartSequence()
             }
         }
+    }
+
+    /**
+     * The outermost tail of [start] (both dispatch paths) — and the only place that clears
+     * [starting] and recomputes after the sequence: the branches inside [startInternal] never
+     * do, so a new session cannot claim [starting] in the gap and have this tail stomp it
+     * (which would also break the N2 stop-during-start decision, which reads [starting] under
+     * [sessionLock]).
+     *
+     * Pre-1.1.0 finding 6: a stop() that won the race ([startCancelled]) is tearing the
+     * session down. If [startInternal] set [audioConfirmed] after the stop's own clear, the
+     * recompute below would derive RECORDING from that stale fact for a session that is
+     * already dead — the widget sits on "Recording" until the next event. The cancel clears
+     * the fact first, so the last derivation is honest.
+     */
+    private fun endStartSequence() {
+        starting.set(false)
+        if (startCancelled) {
+            audioConfirmed = false
+        }
+        recomputePhase()
     }
 
     private fun startInternal(project: Project?) {
@@ -639,6 +654,13 @@ class DictationSession : Disposable {
      * landed while a start was in progress set it — without running [startInternal].
      */
     internal fun isStartCancelledForTest(): Boolean = startCancelled
+
+    /**
+     * Test seam (pre-1.1.0 finding 6): runs [start]'s outermost tail — the finally both
+     * dispatch paths share — so a test can drive the stop-during-start race deterministically
+     * and see what the last phase derivation does, without the beep + microphone.
+     */
+    internal fun endStartSequenceForTest() = endStartSequence()
 
     /**
      * Test seam (review N4): set the "audio confirmed" fact exactly as [startInternal]'s
