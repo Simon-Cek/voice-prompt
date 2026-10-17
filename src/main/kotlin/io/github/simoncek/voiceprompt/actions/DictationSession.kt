@@ -919,7 +919,12 @@ class DictationSession : Disposable {
                 if (indicator.isCanceled || handle.cancelRequested) {
                     log.info("transcription cancelled by user")
                 } else {
-                    log.error("transcribe threw", t)
+                    // AGENTS.md rule 8: idea.log must never carry transcribed text. The exception
+                    // MESSAGE is untrusted here — an engine bug could have stuffed the transcript
+                    // into it (and so could a cause-chain message) — so the log gets the type and
+                    // stack frames only, never the message. The user sees the message in the
+                    // notification below. (Pinned by TranscriptLogGuardTest.)
+                    log.error("transcribe threw: ${t.javaClass.name}\n" + t.stackTrace.joinToString("\n") { "\tat " + it })
                     notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                 }
             }
