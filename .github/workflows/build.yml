@@ -117,9 +117,14 @@ jobs:
         with:
           cache-read-only: true
 
-      # Run tests
+      # Run tests.
+      #
+      # Wrapped in xvfb-run: the suite constructs AWT Frames (dictation-session wiring
+      # tests), and the runner is headless — without a virtual X server those tests fail
+      # with java.awt.HeadlessException. xvfb ships preinstalled on the ubuntu-latest
+      # runner image; -a picks a free display.
       - name: Run Tests
-        run: ./gradlew check -PplatformVersion=${{ matrix.platform-version }} -PcopilotPluginVersion=${{ matrix.copilot-plugin }}
+        run: xvfb-run -a ./gradlew check -PplatformVersion=${{ matrix.platform-version }} -PcopilotPluginVersion=${{ matrix.copilot-plugin }}
 
       # Collect Tests Result of failed tests
       - name: Collect Tests Result

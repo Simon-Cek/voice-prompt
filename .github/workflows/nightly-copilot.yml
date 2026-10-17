@@ -106,8 +106,12 @@ jobs:
 
       # The suite with the resolved Copilot installed in the sandbox (build.gradle.kts
       # accepts it via -PcopilotPluginVersion).
+      #
+      # Wrapped in xvfb-run: the suite constructs AWT Frames, and the runner is headless
+      # — without a virtual X server those tests fail with java.awt.HeadlessException.
+      # xvfb ships preinstalled on the ubuntu-latest runner image; -a picks a free display.
       - name: Run the suite
-        run: ./gradlew check -PcopilotPluginVersion=${{ steps.copilot.outputs.version }}
+        run: xvfb-run -a ./gradlew check -PcopilotPluginVersion=${{ steps.copilot.outputs.version }}
 
       # Collect Tests Result of failed tests
       - name: Collect Tests Result
