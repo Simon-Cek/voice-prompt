@@ -136,6 +136,12 @@
              the platform disposes it on IDE shutdown and dynamic plugin unload (issue #6). -->
         <applicationService serviceImplementation="io.github.simoncek.voiceprompt.actions.DictationSession"/>
 
+        <!-- Pre-1.1.0 finding 7: at IDE startup, remove the stale whisper-server-<pid>.log files
+             the shared home accumulates (one per IDE session, review N11) — on a background
+             thread, best effort. -->
+        <listener class="io.github.simoncek.voiceprompt.stt.StaleServerLogCleanup"
+                  topic="com.intellij.ide.AppLifecycleListener"/>
+
         <!-- Persistent recording indicator on the status bar (issue #5). One widget instance per
              project window; all of them are views of the DictationStatus application service. -->
         <statusBarWidgetFactory implementation="io.github.simoncek.voiceprompt.statusbar.RecordingStatusWidgetFactory" id="VoicePromptRecordingStatus"/>

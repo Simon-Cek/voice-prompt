@@ -821,7 +821,53 @@ object WhisperServerEngine {
         // Under the shared home (review P6), next to the runtime it describes.
         val dir = VoicePromptPaths.baseDir()
         java.nio.file.Files.createDirectories(dir)
-        return File(dir.toFile(), "whisper-server-${ProcessHandle.current().pid()}.log")
+        return File(dir.toFile(), "$SERVER_LOG_PREFIX${ProcessHandle.current().pid()}.log")
+    }
+
+    /** The server-log filename prefix — shared by [defaultLogFile] and the stale-log cleanup. */
+    internal const val SERVER_LOG_PREFIX = "whisper-server-"
+
+    /**
+     * Pre-1.1.0 finding 7: the maximum age (days) a server log may reach before it is removed
+     * even if its PID is still alive — the backstop against a recycled PID number.
+     */
+    private const val STALE_LOG_MAX_AGE_DAYS = 7
+
+    /**
+     * Pre-1.1.0 finding 7: the shared home (review N11) accumulates one
+     * `whisper-server-<pid>.log` per IDE session. Remove the stale ones from [dir]:
+     * - a log whose PID is no longer alive (that IDE is gone), or
+     * - a log older than [STALE_LOG_MAX_AGE_DAYS] days — even when its PID number happens to be
+     *   alive again, because PIDs are recycled.
+     * A fresh log of a live PID is a live session's log (this IDE's or another's) and is kept.
+     * Only files matching the [SERVER_LOG_PREFIX] name pattern are ever touched. Returns the
+     * paths that were removed.
+     */
+    internal fun cleanStaleServerLogs(dir: Path, nowMillis: Long = System.currentTimeMillis()): List<Path> {
+        if (!java.nio.file.Files.isDirectory(dir)) return emptyList()
+        val removed = mutableListOf<Path>()
+        java.nio.file.Files.list(dir).use { stream ->
+            stream.filter { isStaleServerLog(it, nowMillis) }.forEach { path ->
+                runCatching { java.nio.file.Files.delete(path) }
+                    .onSuccess { removed.add(path) }
+                    .onFailure { log.warn("could not remove the stale server log $path", it) }
+            }
+        }
+        return removed
+    }
+
+    /** Pre-1.1.0 finding 7: whether [path] is a stale server log that [cleanStaleServerLogs] removes. */
+    private fun isStaleServerLog(path: Path, nowMillis: Long): Boolean {
+        val name = path.fileName.toString()
+        if (!name.startsWith(SERVER_LOG_PREFIX) || !name.endsWith(".log")) return false
+        val pid = name.removePrefix(SERVER_LOG_PREFIX).removeSuffix(".log").toLongOrNull() ?: return false
+        if (!java.nio.file.Files.isRegularFile(path)) return false
+        // Age first: an old log is stale even if its PID number is alive right now (recycled).
+        val maxAgeMillis = STALE_LOG_MAX_AGE_DAYS * 24L * 60L * 60L * 1000L
+        if (nowMillis - java.nio.file.Files.getLastModifiedTime(path).toMillis() > maxAgeMillis) return true
+        // A fresh log is stale only if the process that wrote it has exited. of(long): no Int
+        // truncation on platforms with large PIDs.
+        return !ProcessHandle.of(pid).isPresent
     }
 
     // --- argument + body construction (pure, unit-tested) ---
