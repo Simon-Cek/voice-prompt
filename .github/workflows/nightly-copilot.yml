@@ -1,0 +1,118 @@
+# Nightly compatibility check: the full suite against the newest stable GitHub Copilot
+# build (marketplace plugin 17718) that fits our IDE line.
+#
+# The main build pins Copilot 1.19.0-252 (build.gradle.kts) as a local-dev convenience;
+# this check chases the newest compatible stable release, so API drift in Copilot — the
+# plugin we integrate with for chat insertion — is caught on the night it ships, not at
+# the next release.
+#
+# The resolver uses the JetBrains marketplace API, which carries each build's
+# since/until build range: a build qualifies when since-build <= 253 <= until-build.
+# Only generic builds count — the platform-specific variants (-linux-x64, -macos-arm64,
+# ...) are packaging for the native IDE builds, not what a JVM IDE installs.
+#
+# Not a merge gate: schedule-only, so a red run is a signal to triage (Copilot drift vs
+# platform change), never a block on main.
+
+name: Nightly Copilot check
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, off-peak (UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-copilot
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Suite against latest stable Copilot
+    runs-on: ubuntu-latest
+    steps:
+
+      # Free GitHub Actions Environment Disk Space
+      - name: Maximize Build Space
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
+
+      # Check out the current repository
+      - name: Fetch Sources
+        uses: actions/checkout@v7
+
+      # Set up the Java environment for the next steps
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+
+      # Setup Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      # Newest stable Copilot that fits the IDE line (build.gradle.kts baseline 2025.3.6.1
+      # = line 253 — keep the two in sync when the baseline moves).
+      - name: Resolve the latest stable Copilot for our IDE line
+        id: copilot
+        run: |
+          set -euo pipefail
+          COPILOT_VERSION=$(python3 - <<'PYEOF'
+          import json
+          import re
+          import sys
+          import urllib.request
+
+          IDE_LINE = 253
+
+          API = "https://plugins.jetbrains.com/api/plugins/17718/updates?size=60"
+
+          with urllib.request.urlopen(API, timeout=30) as r:
+              updates = json.load(r)
+
+
+          def line(value):
+              return int(str(value).split(".")[0]) if value else None
+
+
+          candidates = []
+          for u in updates:
+              if not (u.get("listed") and not u.get("hidden")):
+                  continue
+              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)-(\d+)", u["version"])
+              if not m:
+                  continue  # platform variant or unrecognized scheme
+              since = line(u.get("since")) or 0
+              until = line(u.get("until")) if u.get("until") else 9999
+              if not (since <= IDE_LINE <= until):
+                  continue
+              candidates.append((int(m[1]), int(m[2]), int(m[3]), int(m[4]), int(u["cdate"]), u["version"]))
+
+          if not candidates:
+              sys.exit(f"no stable Copilot build is compatible with IDE line {IDE_LINE}")
+
+          # Newest semver first; within a semver the higher IDE-line build, then the latest date.
+          best = max(candidates)[5]
+          print(f"note: {len(candidates)} compatible stable builds seen; newest is {best}", file=sys.stderr)
+          print(best)
+          PYEOF
+          )
+          echo "version=${COPILOT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "nightly Copilot check will run against: ${COPILOT_VERSION}"
+
+      # The suite with the resolved Copilot installed in the sandbox (build.gradle.kts
+      # accepts it via -PcopilotPluginVersion).
+      - name: Run the suite
+        run: ./gradlew check -PcopilotPluginVersion=${{ steps.copilot.outputs.version }}
+
+      # Collect Tests Result of failed tests
+      - name: Collect Tests Result
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-tests-result
+          path: ${{ github.workspace }}/build/reports/tests
