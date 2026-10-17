@@ -16,4 +16,4 @@ Requires JDK 17+ on `PATH` (the Gradle toolchain resolves the rest).
 
 ## Status
 
-v1.0.0 — released. All MVP acceptance criteria (plan §4) verified in the sandbox IDE against Copilot 1.19.0-252 on IntelliJ IDEA 2025.3.6.1. See [CHANGELOG.md](CHANGELOG.md) for the release notes.
+v1.1.0 — released. Faster dictation (a long-lived whisper-server keeps the model warm), a status bar indicator, opt-in keep-ready microphone, one shared data folder (`VOICE_PROMPT_HOME`), and fail-closed model downloads with resume. See [CHANGELOG.md](CHANGELOG.md) for the release notes.

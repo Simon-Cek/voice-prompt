@@ -62,7 +62,7 @@ bash bin/ide-stop.sh     # stop the IDE + its build daemons (idempotent, safe to
 | --- | --- |
 | IDE (sandbox) log | `.intellijPlatform/sandbox/copilot-voice/IU-2025.3.6.1/log_runIde/idea.log` |
 | `runIde` stdout/stderr | `/tmp/opencode/runide.out` |
-| Plugin zip (distributable) | `build/distributions/copilot-voice-1.0.0.zip` |
+| Plugin zip (distributable) | `build/distributions/copilot-voice-1.1.0.zip` |
 | Gradle config cache / build state | `.gradle/`, `build/` |
 
 If `ide-start.sh` hangs or the IDE never opens, run `bash bin/ide-stop.sh`, then tail
