@@ -577,29 +577,39 @@ object WhisperServerEngine {
             .POST(HttpRequest.BodyPublishers.ofByteArray(body.bytes))
             .build()
         val future = client.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!future.isDone) {
-            // The Cancel button (and cooperative checks) surface here as ProcessCanceledException.
-            indicator?.checkCanceled()
-            if (System.currentTimeMillis() >= deadline) {
-                future.cancel(true)
-                throw InferenceTimeoutException("whisper-server timed out after ${timeoutMs} ms")
+        try {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (!future.isDone) {
+                // The Cancel button (and cooperative checks) surface here as ProcessCanceledException.
+                indicator?.checkCanceled()
+                if (System.currentTimeMillis() >= deadline) {
+                    throw InferenceTimeoutException("whisper-server timed out after ${timeoutMs} ms")
+                }
+                Thread.sleep(50)
             }
-            Thread.sleep(50)
+            val response = future.get()
+            if (response.statusCode() != 200) {
+                // Review N9: carry the status so the caller can tell a rejected request (4xx, keep
+                // the warm server) from a failed inference (5xx, a GPU-failure candidate).
+                // The bundled whisper-server reports a failed inference as HTTP 500 with a JSON
+                // error body (verified against v1.9.5 server.cpp), never as 200 + error text.
+                throw WhisperCliEngine.TranscriptionException(
+                    "whisper-server returned HTTP ${response.statusCode()}: ${response.body().take(200)}",
+                    httpStatus = response.statusCode(),
+                )
+            }
+            log.info("whisper-server inferred ${response.body().length} chars")
+            return response.body()
+        } finally {
+            // Pre-1.1.0 finding 1: on every exit that leaves the inference still running — a user
+            // Cancel (checkCanceled above) or the timeout — close the connection by cancelling the
+            // future. The real server polls for the disconnect and aborts the in-flight inference,
+            // so the next clip is not queued behind an abandoned one (before this fix a Cancel
+            // left the connection open and the server kept the model busy). A finished future is
+            // left alone: the success path already consumed it, and cancel on a completed future
+            // is a no-op anyway.
+            if (!future.isDone) future.cancel(true)
         }
-        val response = future.get()
-        if (response.statusCode() != 200) {
-            // Review N9: carry the status so the caller can tell a rejected request (4xx, keep
-            // the warm server) from a failed inference (5xx, a GPU-failure candidate).
-            // The bundled whisper-server reports a failed inference as HTTP 500 with a JSON
-            // error body (verified against v1.9.5 server.cpp), never as 200 + error text.
-            throw WhisperCliEngine.TranscriptionException(
-                "whisper-server returned HTTP ${response.statusCode()}: ${response.body().take(200)}",
-                httpStatus = response.statusCode(),
-            )
-        }
-        log.info("whisper-server inferred ${response.body().length} chars")
-        return response.body()
     }
 
     /** True while the server reports the model loaded (200 from `/health`). */
