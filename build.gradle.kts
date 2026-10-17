@@ -49,6 +49,15 @@ tasks.test {
     // directory for the whole test suite, so no test ever reads or writes the developer's
     // real home.
     systemProperty("voiceprompt.home", layout.buildDirectory.dir("test-home").get().asFile.absolutePath)
+    // The 2025.3+ platform dispatches Logger records asynchronously (verified in
+    // com.intellij.openapi.diagnostic.AsyncLogKt, util-8.jar of IU-2025.3.6.1: every
+    // JulLogger call is enqueued and published by a background coroutine). Tests that assert on
+    // captured log records (LocatorLogLevelTest, MicTimingLogTest, TranscriptLogGuardTest) then
+    // race the consumer — LocatorLogLevelTest flaked on the CI 253 leg ("no locator log record
+    // found"). This is the platform's own switch: with it set, AsyncLogKt falls back to
+    // synchronous Logger.log(...) dispatch, so the record reaches the test's JUL handler before
+    // the call returns. A no-op on platform lines without async dispatch (e.g. 242).
+    jvmArgs("-Dintellij.platform.log.sync=true")
 }
 
 tasks.verifyPlugin {
