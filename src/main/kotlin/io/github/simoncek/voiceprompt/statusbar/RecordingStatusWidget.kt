@@ -338,6 +338,19 @@ class RecordingStatusWidget(private val project: Project) : IconLikeCustomStatus
     /** Test seam (review §3): whether the spinner's animation is currently running. */
     internal fun spinnerRunning(): Boolean = spinner.isRunning
 
+    /**
+     * Test seam (review §3): whether the widget's last [applyFace] resumed (true) or
+     * suspended (false) the spinner. The decision is the widget's contract, and — unlike
+     * [spinnerRunning] — it is observable on every supported line: the platform deliberately
+     * skips animation in unit-test mode, and what that leaves observable differs by line —
+     * on 242 the animator never starts in tests, so [spinnerRunning] stays false whatever
+     * the widget decided, while on 253 a hidden animator keeps running and it reflects the
+     * decision. Derived from [lastFace] (the single source [applyFace] turns into Swing),
+     * so it cannot drift from the resume/suspend call.
+     */
+    internal val spinnerResumed: Boolean
+        get() = lastFace?.spinner ?: false
+
     /** Test seam (review §3): the current label text. */
     internal fun labelText(): String = textLabel.text
 

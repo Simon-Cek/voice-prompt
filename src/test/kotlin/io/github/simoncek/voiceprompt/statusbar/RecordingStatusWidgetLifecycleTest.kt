@@ -209,22 +209,33 @@ class RecordingStatusWidgetLifecycleTest : LightPlatformTestCase() {
     /**
      * Review §3: the spinner animates only in OPENING and TRANSCRIBING — in every other face
      * it is hidden and suspended, so no animation timer runs at IDLE or RECORDING.
+     *
+     * The decision is asserted on the widget's own state ([RecordingStatusWidget.spinnerResumed]),
+     * not on [RecordingStatusWidget.spinnerRunning]: the platform deliberately skips animation
+     * in unit-test mode, and what that leaves observable differs by line — on 242 the animator
+     * never starts in tests, so isRunning() stays false whatever the widget decided; on 253 a
+     * hidden animator keeps running, so it reflects the decision. The decision itself is the
+     * widget's contract and is identical on both lines. The "must not be running" direction is
+     * additionally asserted against the platform state, where it holds on both lines (a
+     * suspended icon is not running; on 242 nothing ever runs in tests).
      */
     fun test_spinner_is_suspended_when_not_shown() {
         setPhase(DictationPhase.IDLE)
         awaitEdt("the IDLE face must land") { widget.labelText() == VoiceBundle["statusbar.idle"] }
+        assertFalse("the IDLE face must not resume the spinner", widget.spinnerResumed)
         assertFalse("the IDLE face must not animate the spinner", widget.spinnerRunning())
 
         setPhase(DictationPhase.OPENING)
-        awaitEdt("the OPENING face must animate the spinner") { widget.spinnerRunning() }
-        assertTrue(widget.spinnerRunning())
+        awaitEdt("the OPENING face must land") { widget.labelText() == VoiceBundle["statusbar.opening"] }
+        assertTrue("the OPENING face must resume the spinner", widget.spinnerResumed)
 
         setPhase(DictationPhase.TRANSCRIBING)
-        awaitEdt("the TRANSCRIBING face must animate the spinner") { widget.spinnerRunning() }
-        assertTrue(widget.spinnerRunning())
+        awaitEdt("the TRANSCRIBING face must land") { widget.labelText() == VoiceBundle["statusbar.transcribing"] }
+        assertTrue("the TRANSCRIBING face must resume the spinner", widget.spinnerResumed)
 
         setPhase(DictationPhase.RECORDING)
-        awaitEdt("the RECORDING face must suspend the spinner") { !widget.spinnerRunning() }
+        awaitEdt("the RECORDING face must land") { widget.labelText() == VoiceBundle["statusbar.recording"] }
+        assertFalse("the RECORDING face must suspend the spinner", widget.spinnerResumed)
         assertFalse("the RECORDING face must not animate the spinner", widget.spinnerRunning())
     }
 

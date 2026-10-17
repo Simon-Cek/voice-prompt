@@ -13,14 +13,25 @@ dependencies {
 
     // IntelliJ Platform Gradle Plugin Dependencies Extension - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-dependencies-extension.html
     intellijPlatform {
-        intellijIdea("2025.3.6.1")
+        // The IDE line is parameterized so CI can verify the whole `sinceBuild`..latest range
+        // (`untilBuild` is null, i.e. "all future builds"): .github/workflows/build.yml passes
+        // `-PplatformVersion=<line>` per matrix leg. The default stays the dev baseline.
+        intellijIdea((findProperty("platformVersion") as String?) ?: "2025.3.6.1")
         testFramework(TestFrameworkType.Platform)
 
         // Declared here so it is part of sandbox preparation (PrepareSandboxTask installs it on
         // every `runIde` start). A copy installed by the user inside the sandbox does not survive
         // relaunches: `runIde` re-prepares the sandbox and wipes the user plugins directory.
         // This keeps GitHub Copilot available for the chat-insertion checks across relaunches.
-        plugin("com.github.copilot", "1.19.0-252")
+        //
+        // It is a local-dev convenience, not a plugin requirement — no test needs the real
+        // plugin (the chat tests use a fixture window). Its builds are line-specific
+        // (1.19.0-252 declares since-build 252, until-build 253.*), so CI legs on unsupported
+        // lines pass an empty `-PcopilotPluginVersion=` to skip it entirely.
+        val copilotVersion = (findProperty("copilotPluginVersion") as String?) ?: "1.19.0-252"
+        if (copilotVersion.isNotBlank()) {
+            plugin("com.github.copilot", copilotVersion)
+        }
     }
 }
 

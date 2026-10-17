@@ -1,7 +1,6 @@
 package io.github.simoncek.voiceprompt.actions
 
 import com.intellij.openapi.actionSystem.ActionPlaces
-import com.intellij.openapi.actionSystem.ActionUiKind
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.Presentation
@@ -82,12 +81,14 @@ class DictationSessionFocusRearmTest : LightPlatformTestCase() {
             stroke.keyCode,
             KeyEvent.CHAR_UNDEFINED,
         )
-        return AnActionEvent.createEvent(
-            DataContext.EMPTY_CONTEXT,
-            Presentation(),
-            ActionPlaces.UNKNOWN,
-            ActionUiKind.NONE,
+        // createFromInputEvent is the overload that exists on every supported line (242+);
+        // the ActionUiKind-taking createEvent(...) is 243+ and would break the 242 CI leg.
+        // The production code only reads inputEvent and project from the event (N3 guard).
+        return AnActionEvent.createFromInputEvent(
             keyEvent,
+            ActionPlaces.UNKNOWN,
+            Presentation(),
+            DataContext.EMPTY_CONTEXT,
         )
     }
 
