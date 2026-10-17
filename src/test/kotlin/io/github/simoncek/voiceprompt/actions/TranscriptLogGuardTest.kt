@@ -43,7 +43,7 @@ import javax.swing.JTextField
  * must appear nowhere. The third test is the strict one: an engine exception whose MESSAGE
  * carries the transcript (the realistic worst case — an engine bug echoing
  * "last output was: ..."). The catch block must log the type and stack frames, never the
- * message; against a `log.error("transcribe threw", t)`-style catch the scan fails.
+ * message; against a `log.warn("transcribe threw", t)`-style catch the scan fails.
  *
  * Coverage notes:
  *  - The success test also drives the real deliverToChat + sink chain
@@ -160,7 +160,7 @@ class TranscriptLogGuardTest : LightPlatformTestCase() {
             val processor = LeakCaptureProcessor()
             withErrorCapture(processor) { runClip(s, "guard.wav") }
 
-            assertFailureLogged(processor)
+            assertFailureLogged()
             // The realistic error details may be present — the transcript is what may not be.
             assertNoLeak(processor)
         } finally {
@@ -183,7 +183,7 @@ class TranscriptLogGuardTest : LightPlatformTestCase() {
             val processor = LeakCaptureProcessor()
             withErrorCapture(processor) { runClip(s, "guard.wav") }
 
-            assertFailureLogged(processor)
+            assertFailureLogged()
             assertNoLeak(processor)
         } finally {
             s.engineTranscribe = null
@@ -237,11 +237,14 @@ class TranscriptLogGuardTest : LightPlatformTestCase() {
         )
     }
 
-    /** The catch's error log must be present in the capture — the failure was logged at all. */
-    private fun assertFailureLogged(processor: LeakCaptureProcessor) {
-        val hasFailure = processor.errors.any { it.first.contains("transcribe threw") }
+    /** The catch's failure log must be present — the failure was logged at all. Since the
+     *  pre-1.1.0 finding 4 change it is at WARN, so it arrives via the JUL root handler (error
+     *  capture is still scanned too, for leaks). */
+    private fun assertFailureLogged() {
+        val hasFailure = records.any { it.message?.contains("transcribe threw") == true }
         assertTrue(
-            "the 'transcribe threw' failure must be logged; error logs seen: " + processor.errors.map { it.first },
+            "the 'transcribe threw' failure must be logged; warn records seen: " +
+                records.filter { it.level == Level.WARNING }.map { it.message },
             hasFailure,
         )
     }

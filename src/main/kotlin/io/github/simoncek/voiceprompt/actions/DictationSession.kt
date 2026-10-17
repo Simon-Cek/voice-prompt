@@ -135,7 +135,11 @@ class DictationSession : Disposable {
         it.onDeviceLost = { onMicLost() }
     }
     @Volatile private var keyWatcher: AWTEventListener? = null
-    private val chatSink = ChatSinkChain.default()
+    /**
+     * Test seam (pre-1.1.0 finding 4): substitutes the sink chain so a test can make
+     * [deliverToChat]'s call throw. The default is the real chain.
+     */
+    internal var chatSink: ChatSinkChain = ChatSinkChain.default()
     /** The shared dictation phase; the status bar widget and the mic test are read-only views. */
     private val status = DictationStatus.instance
     /**
@@ -913,18 +917,28 @@ class DictationSession : Disposable {
                     deliverTranscript?.invoke(project, text) ?: deliverToChat(project, text)
                 }
             } catch (t: Throwable) {
-                // A user cancel unwinds the engine as a throw (its checkCanceled, or a
-                // backend that surfaces the cancel): no error notification, just the log —
-                // the flag covers the case where the indicator never learned of the cancel.
+                // Pre-1.1.0 finding 4: a cancellation — a user Cancel, a platform cancel, a
+                // shutdown — unwinds the engine as a ProcessCanceledException. Rethrow it so
+                // the platform settles the task as a cancel: it used to be swallowed here, and
+                // when the indicator had never learned of the cancel (a shutdown-aborted
+                // server start) it surfaced as a "transcribe failed" ERROR notification.
+                if (t is ProcessCanceledException) throw t
+                // A user cancel that surfaces as a non-cancel throw (a backend that checks the
+                // flag and throws its own exception): no error notification, just the log — the
+                // flag covers the case where the indicator never learned of the cancel.
                 if (indicator.isCanceled || handle.cancelRequested) {
                     log.info("transcription cancelled by user")
                 } else {
-                    // AGENTS.md rule 8: idea.log must never carry transcribed text. The exception
-                    // MESSAGE is untrusted here — an engine bug could have stuffed the transcript
-                    // into it (and so could a cause-chain message) — so the log gets the type and
-                    // stack frames only, never the message. The user sees the message in the
-                    // notification below. (Pinned by TranscriptLogGuardTest.)
-                    log.error("transcribe threw: ${t.javaClass.name}\n" + t.stackTrace.joinToString("\n") { "\tat " + it })
+                    // Pre-1.1.0 finding 4: an expected failure (a broken model, a timeout, a
+                    // missing server) is warn, not error — on a release IDE an error log lights
+                    // the red plugin-error indicator, and the notification below already tells
+                    // the user. AGENTS.md rule 8: idea.log must never carry transcribed text.
+                    // The exception MESSAGE is untrusted here — an engine bug could have stuffed
+                    // the transcript into it (and so could a cause-chain message) — so the log
+                    // gets the type and stack frames only, never the message. The user sees the
+                    // message in the notification below. (Pinned by TranscriptLogGuardTest and
+                    // DictationSessionExpectedFailureTest.)
+                    log.warn("transcribe threw: ${t.javaClass.name}\n" + t.stackTrace.joinToString("\n") { "\tat " + it })
                     notify(project, VoiceBundle.message("notification.transcribe.failed", t.message ?: t.javaClass.simpleName), NotificationType.ERROR)
                 }
             }
@@ -993,7 +1007,10 @@ class DictationSession : Disposable {
                     }
                 }
             } catch (t: Throwable) {
-                log.error("deliverToChat threw (${CopilotVersion.describe()}) -> balloon", t)
+                // Pre-1.1.0 finding 4: an expected failure (a sink that throws) is warn, not
+                // error — on a release IDE an error log lights the red plugin-error indicator.
+                // The balloon below already tells the user.
+                log.warn("deliverToChat threw (${CopilotVersion.describe()}) -> balloon", t)
                 fallbackBalloon(project, text)
             }
         }

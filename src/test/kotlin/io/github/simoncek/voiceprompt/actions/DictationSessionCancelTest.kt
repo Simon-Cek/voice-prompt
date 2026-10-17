@@ -12,6 +12,7 @@ import java.io.File
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -109,12 +110,26 @@ class DictationSessionCancelTest : LightPlatformTestCase() {
         awaitPhase(DictationPhase.TRANSCRIBING)
 
         try {
-            val t1 = Thread { s.transcribeBody(EmptyProgressIndicator(), null, runningWav, running) }
+            val runningError = AtomicReference<Throwable?>()
+            val t1 = Thread {
+                try {
+                    s.transcribeBody(EmptyProgressIndicator(), null, runningWav, running)
+                } catch (e: Throwable) {
+                    runningError.set(e)
+                }
+            }
             t1.start()
             assertTrue("clip 1 should start its inference", inInference.await(10, TimeUnit.SECONDS))
 
             // Clip 2 is queued behind clip 1's lock — waiting in transcribeBody's poll loop.
-            val t2 = Thread { s.transcribeBody(EmptyProgressIndicator(), null, queuedWav, queued) }
+            val queuedError = AtomicReference<Throwable?>()
+            val t2 = Thread {
+                try {
+                    s.transcribeBody(EmptyProgressIndicator(), null, queuedWav, queued)
+                } catch (e: Throwable) {
+                    queuedError.set(e)
+                }
+            }
             t2.start()
 
             // Review §3: cancel everything — both the running and the queued clip.
@@ -134,6 +149,18 @@ class DictationSessionCancelTest : LightPlatformTestCase() {
                 "a cancelled clip must not deliver its transcript",
                 emptyList<String>(),
                 delivered,
+            )
+            // Pre-1.1.0 finding 4: the cancellation must surface as a ProcessCanceledException —
+            // the platform settles the task as a cancel — not be swallowed into a "transcribe
+            // failed" ERROR notification. (The queued clip threw one at its cancel check; the
+            // running clip's must not be eaten by the catch block.)
+            assertTrue(
+                "a cancelled clip must surface as ProcessCanceledException, was: ${runningError.get()}",
+                runningError.get() is ProcessCanceledException,
+            )
+            assertTrue(
+                "a cancelled clip must surface as ProcessCanceledException, was: ${queuedError.get()}",
+                queuedError.get() is ProcessCanceledException,
             )
             // Both clips released — the phase returns to IDLE (not stuck on TRANSCRIBING).
             awaitPhase(DictationPhase.IDLE)
