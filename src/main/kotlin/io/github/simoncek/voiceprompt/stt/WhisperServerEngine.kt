@@ -315,8 +315,9 @@ object WhisperServerEngine {
                         }
                         // Pre-1.1.0 finding 3: the server was published but never worked for this
                         // utterance (died on startup, timeout, …) — count it as a startup failure
-                        // for this config.
-                        markStartupFailure(scope)
+                        // for this config. A 5xx is excluded (review item 2): the server started
+                        // and served — the inference just failed.
+                        if (!isServerError(t)) markStartupFailure(scope)
                         if (!allowFallback) {
                             log.warn("whisper-server request failed; rethrowing (fallback disabled)", t)
                             throw t
@@ -342,6 +343,14 @@ object WhisperServerEngine {
     /** Review N9: HTTP 4xx — the server rejected this request; it is not a GPU failure. */
     private fun isRequestProblem(t: Throwable): Boolean =
         t is WhisperCliEngine.TranscriptionException && (t.httpStatus ?: 0) in 400..499
+
+    /**
+     * Pre-1.1.0 review item 2: HTTP 5xx — the server IS up and did the work, but the inference
+     * itself failed (an OOM or a CUDA error, for instance). That is not a startup failure:
+     * counting it would disable a server that started perfectly well.
+     */
+    private fun isServerError(t: Throwable): Boolean =
+        t is WhisperCliEngine.TranscriptionException && (t.httpStatus ?: 0) in 500..599
 
     /**
      * Review N9 #1: the request failed on a GPU-keyed server (HTTP 5xx, a dead process, an I/O
@@ -772,6 +781,9 @@ object WhisperServerEngine {
      * Pre-1.1.0 finding 3: one more utterance where the server path failed to produce a result
      * (did not start, or was published but never worked) counts for the user's config; a
      * different config starts fresh at one. Two in a row disable the server for the session.
+     *
+     * Pre-1.1.0 review item 2: HTTP 5xx responses never reach this — the server started and
+     * served, so an inference-level failure is not a startup failure and must not count.
      */
     private fun markStartupFailure(scope: String) {
         synchronized(LOCK) {

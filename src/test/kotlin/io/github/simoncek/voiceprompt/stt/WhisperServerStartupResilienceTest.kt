@@ -28,6 +28,9 @@ import org.junit.Test
  * 2. The HttpClient used for loopback must never go through a proxy (the spec's
  *    `ProxySelector.of(null)`, expressed as the platform's `HttpClient.Builder.NO_PROXY`
  *    selector in JDK 25).
+ * 3. 1.1.0: an HTTP 5xx from a live server is a failed inference, not a startup failure — it
+ *    does not count toward the session disable and the warm server is kept; a successful
+ *    request still resets the failure counter.
  *
  * Linux/macOS only, like the other fake-server tests.
  */
@@ -111,6 +114,91 @@ class WhisperServerStartupResilienceTest {
         )
     }
 
+    /**
+     * 1.1.0 fix: an HTTP 5xx from a LIVE server (it answered, so the process is healthy) is a
+     * failed inference, not a startup failure. Two 500s in a row must not disable the server —
+     * the third dictation still goes through the SAME warm server (before the fix the two 500s
+     * had already disabled it and the third was the no-server ISE).
+     */
+    @Test
+    fun `http 5xx responses do not disable the server`() {
+        val broken = fake500Server()
+        val model = Paths.get("/models/ggml-tiny.en.bin")
+
+        // Three utterances in a row all get HTTP 500 from the live fake server…
+        val first = transcribe(broken, model)
+        assertTrue("the first 500 must fail the utterance, was: ${first.exceptionOrNull()}", first.isFailure)
+        assertTrue(
+            "the error must carry the HTTP 500: ${first.exceptionOrNull()}",
+            first.exceptionOrNull() is WhisperCliEngine.TranscriptionException,
+        )
+        val second = transcribe(broken, model)
+        assertTrue("the second 500 must fail the utterance, was: ${second.exceptionOrNull()}", second.isFailure)
+        // …and the THIRD must still go through the server path (and fail with the HTTP error,
+        // not the disabled-server ISE).
+        val third = transcribe(broken, model)
+        assertTrue(
+            "two 5xx must NOT disable the server — the third must fail with the HTTP error, was: ${third.exceptionOrNull()}",
+            third.exceptionOrNull() is WhisperCliEngine.TranscriptionException,
+        )
+        assertEquals(
+            "the same warm server must serve all three (no restart, no disable)",
+            1,
+            startSequence().size,
+        )
+    }
+
+    /**
+     * Pre-1.1.0 finding 3, the reset half: a SUCCESSFUL request clears the startup-failure
+     * counter. One model/processing: a startup death (1), a success (reset), a startup death
+     * (1 again), a startup death (2 → disabled). Without the reset the counter would hit 2
+     * already on the third utterance, so the fourth would be the disabled no-server ISE
+     * instead of an attempted start, and there would be 3 starts, not 4.
+     *
+     * The fakes are stateless (a death fake and a serve-once fake, chosen per call) — a fake
+     * must not be able to count its own launches, because that file state is not reliable
+     * across processes (observed in this environment).
+     */
+    @Test
+    fun `a successful request resets the startup-failure counter`() {
+        val dying = fakeDyingServer()
+        val once = fakeOnceServer()
+        val model = Paths.get("/models/ggml-tiny.en.bin")
+
+        // 1: a startup death — the first failure for this config.
+        val t1 = transcribe(dying, model)
+        assertTrue("the first startup death must fail the utterance, was: ${t1.exceptionOrNull()}", t1.isFailure)
+        // 2: the one good start — its success resets the counter.
+        val t2 = transcribe(once, model)
+        assertEquals("the one good start must serve the utterance, was: ${t2.exceptionOrNull()}", "ok", t2.getOrNull())
+        waitUntilEngineSeesDeath("the serve-once fake")
+        // 3: a fresh startup death — counts from one again, NOT from two.
+        val t3 = transcribe(dying, model)
+        assertTrue("the next startup death must fail the utterance, was: ${t3.exceptionOrNull()}", t3.isFailure)
+        // 4: the second failure since the success — the disable lands HERE: t4 must still be a
+        // failed start ATTEMPT, not the disabled no-server ISE (which would mean the counter
+        // never reset and the disable already landed on the 3rd attempt).
+        val t4ex = transcribe(dying, model).exceptionOrNull()
+        assertTrue("the fourth utterance must fail, was: $t4ex", t4ex != null)
+        assertTrue(
+            "the success must have reset the counter — the disable must not have landed before " +
+                "the 4th attempt (that would be the disabled no-server ISE), was: $t4ex",
+            t4ex !is IllegalStateException || !t4ex.message!!.contains("no whisper-server available"),
+        )
+        // 5: disabled now — no further start is attempted.
+        val t5 = transcribe(dying, model)
+        assertTrue(
+            "the disabled path must surface as the no-server ISE, was: ${t5.exceptionOrNull()}",
+            t5.exceptionOrNull() is IllegalStateException,
+        )
+        assertEquals(
+            "four utterances must have attempted four starts — without the reset the disable " +
+                "would land on the 3rd attempt and there would be only 3 starts",
+            4,
+            startSequence().size,
+        )
+    }
+
     /** The loopback client must resolve to no proxy, even when the machine has one configured. */
     @Test
     fun `the loopback http client bypasses proxies`() {
@@ -149,16 +237,114 @@ class WhisperServerStartupResilienceTest {
         }
 
     /** A whisper-server stand-in that logs its launch and dies — a startup that never succeeds. */
-    private fun fakeDyingServer(): Path {
-        val python = """
-            #!/usr/bin/env python3
-            import sys
+    private fun fakeDyingServer(): Path = fakeBinary(
+        "whisper-server",
+        """
+        #!/usr/bin/env python3
+        import sys
 
-            with open("starts.log", "a") as f:
-                f.write("FAKE-STARTUP mode=dies\n")
-            sys.exit(1)
-        """.trimIndent()
-        val script = dir!!.resolve("whisper-server")
+        with open("starts.log", "a") as f:
+            f.write("FAKE-STARTUP mode=dies\n")
+        sys.exit(1)
+        """.trimIndent(),
+    )
+
+    /**
+     * A whisper-server stand-in that is ALIVE but always rejects the inference with HTTP 500 —
+     * the "the server is healthy, this inference failed" case (a 5xx must not count as a
+     * startup failure).
+     */
+    private fun fake500Server(): Path = fakeBinary(
+        "whisper-server",
+        """
+        #!/usr/bin/env python3
+        import sys
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+
+        with open("starts.log", "a") as f:
+            f.write("FAKE-STARTUP mode=500\n")
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, code, body):
+                data = body.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.path == "/health":
+                    self._send(200, '{"status": "ok"}')
+                else:
+                    self._send(404, "not found")
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if self.path != "/inference":
+                    self._send(404, "not found")
+                    return
+                self._send(500, "inference failed")
+
+            def log_message(self, *args):
+                pass
+
+        ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+        """.trimIndent(),
+    )
+
+    /**
+     * A whisper-server stand-in that is ALIVE and answers one /inference with 200 "ok", then
+     * dies — the success phase of the reset test. Stateless on purpose: it never reads shared
+     * state to decide what to do (cross-process file state is not reliable in this environment).
+     */
+    private fun fakeOnceServer(): Path = fakeBinary(
+        "whisper-server-once",
+        """
+        #!/usr/bin/env python3
+        import os, sys
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+
+        with open("starts.log", "a") as f:
+            f.write("FAKE-STARTUP mode=once\n")
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, code, body):
+                data = body.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.path == "/health":
+                    self._send(200, '{"status": "ok"}')
+                else:
+                    self._send(404, "not found")
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if self.path != "/inference":
+                    self._send(404, "not found")
+                    return
+                self._send(200, "ok")
+                os._exit(1)  # die after the one good request: the next utterance must restart
+
+            def log_message(self, *args):
+                pass
+
+        ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+        """.trimIndent(),
+    )
+
+    /** Writes [python] to an executable [name] in the test dir and returns its path. */
+    private fun fakeBinary(name: String, python: String): Path {
+        val script = dir!!.resolve(name)
         Files.writeString(script, python)
         val perms = Files.getPosixFilePermissions(script)
         perms.add(PosixFilePermission.OWNER_EXECUTE)
@@ -172,6 +358,38 @@ class WhisperServerStartupResilienceTest {
         File(dir!!.toFile(), "starts.log").takeIf { it.exists() }
             ?.readLines()?.filter { it.startsWith("FAKE-STARTUP") }
             ?: emptyList()
+
+    /**
+     * Blocks until the engine's OWN view of the warm server is dead — the exact
+     * `handle.process.isAlive` check [WhisperServerEngine]'s fast path performs — so the next
+     * transcribe deterministically replaces it with a fresh start. Waiting on the kernel side
+     * (e.g. kill -0) is not enough: after the kernel reaps the process the JVM may still report
+     * isAlive=true for a short window, and in that window the fast path hands back the dead
+     * handle (observed in this environment).
+     */
+    private fun waitUntilEngineSeesDeath(what: String) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val handle = engineHandle()
+            if (handle == null || !engineHandleProcess(handle).isAlive) return
+            Thread.sleep(20)
+        }
+        error("$what must be dead in the engine's view within 10 s")
+    }
+
+    /** The engine's current [ServerHandle] (private field), or null when there is none. */
+    private fun engineHandle(): Any? {
+        val field = WhisperServerEngine::class.java.getDeclaredField("handle")
+        field.isAccessible = true
+        return field.get(WhisperServerEngine)
+    }
+
+    private fun engineHandleProcess(handle: Any): java.lang.Process {
+        val field = handle.javaClass.getDeclaredField("process")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        return field.get(handle) as java.lang.Process
+    }
 
     /** The engine's private HttpClient (its lazy field), for the proxy assertion. */
     private fun httpClient(): HttpClient {
