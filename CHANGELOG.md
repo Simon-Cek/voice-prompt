@@ -25,10 +25,11 @@ Faster dictation, one shared data folder, and fail-closed model downloads.
 
 - Cancel and timeout now abort the in-flight inference on the server instead of leaving it queued behind the next clip.
 - A whisper-server that never becomes healthy (blocked loopback, etc.) no longer keeps re-spawning: after two consecutive startup failures it is disabled for the session, and the loopback client bypasses system proxies.
+- A server that is running but answers with HTTP 5xx (a failed inference, e.g. out of memory) no longer counts as a startup failure, so a healthy server is not disabled after two failed inferences.
 - Expected transcription failures (a whisper error, a timeout) no longer light up the red plugin-error indicator; they are logged at warn and the notification is unchanged.
 - Rapid clips can no longer collide on the temp WAV name; the file is created with a unique, owner-only name.
 - A cancelled start can no longer leave the widget stuck on Recording.
-- Stale `whisper-server-<pid>.log` files are cleaned up from the shared data folder at IDE startup.
+- Stale `whisper-server-<pid>.log` files are cleaned up from the shared data folder at the first dictation of a session, right before the next server log is written.
 
 ## [1.0.0] - 2026-10-11
 
