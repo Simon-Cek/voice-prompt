@@ -1,42 +1,41 @@
 package io.github.simoncek.voiceprompt.stt
 
-import com.intellij.ide.AppLifecycleListener
 import com.intellij.openapi.diagnostic.Logger
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Pre-1.1.0 finding 7: the shared home (review N11) accumulates one `whisper-server-<pid>.log`
  * per IDE session, because the log is named per process precisely because the home is shared.
- * At IDE startup this removes the stale ones (a dead PID, or older than 7 days —
+ * This removes the stale ones (a dead PID, or older than 7 days —
  * [WhisperServerEngine.cleanStaleServerLogs]) on a background thread: file I/O must not run on
- * the EDT (AGENTS.md rule 1). Best effort — a failure here never affects startup, and the next
- * startup retries.
+ * the EDT (AGENTS.md rule 1). Best effort — a failure here never affects the dictation, and
+ * the next session retries.
  *
- * [AppLifecycleListener] is `@ApiStatus.Internal`, and there is no supported alternative for
- * application-startup code in the 2025.3 platform (verified against IU-2025.3.6.1):
- * `PostStartupActivity` no longer exists, `StartupActivity` is `@ApiStatus.Obsolete` and
- * project-scoped, and the `applicationActivity` EP rejects extensions from non-core plugins
- * (ApplicationLoader's asyncAppListenerAllowListForNonCorePlugin). The platform itself
- * registers its application-startup hooks on this same topic (PlatformExtensions.xml, e.g.
- * UpdateCheckerService, WindowButtonsAppLifecycleListener), and the current plugin-SDK
- * guidance for application startup is to subscribe to it.
+ * It runs lazily — [WhisperServerEngine] calls [ensureOnce] on the first dictation of a
+ * session — instead of at app startup. The stale logs only matter before the next server log
+ * is written, so cleaning up right before that is as good as cleaning up at startup, and it
+ * keeps the plugin free of internal-API usage and of an extension-point registration (the
+ * `AppLifecycleListener` hook used before 1.1.0 was `@ApiStatus.Internal`).
  */
-class StaleServerLogCleanup : AppLifecycleListener {
+class StaleServerLogCleanup {
 
     private val log = Logger.getInstance(StaleServerLogCleanup::class.java)
 
+    /** The cleanup runs at most once per instance; the engine keeps one instance for the JVM. */
+    private val started = AtomicBoolean(false)
+
     /**
-     * Test seam (finding 7): a latch a test can await after [runCleanup] to prove the work ran
+     * Test seam (finding 7): a latch a test can await after [ensureOnce] to prove the work ran
      * to completion. Null in production.
      */
     internal var doneForTest: CountDownLatch? = null
 
-    override fun appStarted() {
-        runCleanup(doneForTest)
-    }
-
-    /** The work itself: clean the shared home's stale server logs, on a daemon background thread. */
-    internal fun runCleanup(done: CountDownLatch?) {
+    /**
+     * Runs the cleanup once, on a daemon background thread; a second call is a no-op.
+     */
+    fun ensureOnce() {
+        if (!started.compareAndSet(false, true)) return
         Thread({
             runCatching {
                 val removed = WhisperServerEngine.cleanStaleServerLogs(VoicePromptPaths.baseDir())
@@ -47,7 +46,7 @@ class StaleServerLogCleanup : AppLifecycleListener {
                     )
                 }
             }.onFailure { log.warn("stale server-log cleanup failed", it) }
-            done?.countDown()
+            doneForTest?.countDown()
         }, "voice-prompt-log-cleanup").apply {
             isDaemon = true
             start()

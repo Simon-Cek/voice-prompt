@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * Pre-1.1.0 finding 7: the shared home (review N11) accumulates one
  * `whisper-server-<pid>.log` per IDE session. These pin the cleanup rule — a log is stale
  * when its PID is dead OR it is older than 7 days (the backstop against recycled PID
- * numbers) — and that the app-startup listener runs it against the shared home.
+ * numbers) — and that the engine's first-use hook runs it against the shared home.
  * Deterministic: ages are set via the mtime and the clock is injected; no sleeps.
  */
 class StaleServerLogCleanupTest {
@@ -105,9 +105,10 @@ class StaleServerLogCleanupTest {
     }
 
     @Test
-    fun `the app-startup listener cleans the shared home`() {
-        // End to end: the platform calls appStarted(); the work must run against
-        // VoicePromptPaths.baseDir() (build/test-home under the suite) on a background thread.
+    fun `the first-use cleanup runs once and cleans the shared home`() {
+        // End to end: the engine calls ensureOnce() on the first dictation of the session; the
+        // work must run against VoicePromptPaths.baseDir() (build/test-home under the suite)
+        // on a background thread — and a second call must be a no-op (once per JVM).
         val home = VoicePromptPaths.baseDir()
         Files.createDirectories(home)
         dirs.add(home)
@@ -116,9 +117,10 @@ class StaleServerLogCleanupTest {
         val cleanup = StaleServerLogCleanup()
         val latch = CountDownLatch(1)
         cleanup.doneForTest = latch
-        cleanup.appStarted()
+        cleanup.ensureOnce()
+        cleanup.ensureOnce()
         assertTrue("the cleanup must run to completion", latch.await(10, TimeUnit.SECONDS))
-        assertFalse("the stale log must be gone after the startup cleanup", Files.exists(stale))
-        assertTrue("the live session's log must survive the startup cleanup", Files.exists(live))
+        assertFalse("the stale log must be gone after the cleanup", Files.exists(stale))
+        assertTrue("the live session's log must survive the cleanup", Files.exists(live))
     }
 }

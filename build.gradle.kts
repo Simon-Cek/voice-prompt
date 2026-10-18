@@ -1,5 +1,4 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
-import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask
 
 plugins {
     id("org.jetbrains.kotlin.jvm")
@@ -42,26 +41,6 @@ intellijPlatform {
             sinceBuild = "242"
             untilBuild = provider { null }
         }
-    }
-    pluginVerification {
-        // StaleServerLogCleanup deliberately overrides AppLifecycleListener.appStarted() — the
-        // only viable hook for application-startup code (see its KDoc). It is the plugin's only
-        // internal-API usage, and it is intentional.
-        //
-        // The verifier's `-ignored-problems` file (ignoredProblemsFile) cannot suppress it:
-        // in verifier-cli 1.410 internal-API usages flow through a separate ApiUsageFilter
-        // chain (PluginVerifier.partitionReportAndIgnoredInternalApiUsages) that has no
-        // pattern-based filter, so the ProblemsFilter built from that file is never consulted
-        // for them. The supported way to keep the finding visible but non-fatal is the
-        // failureLevel property: INTERNAL_API_USAGES is still reported (as a warning) in the
-        // verifier report and the Gradle problems panel, but no longer fails the build.
-        // Everything else stays fatal (default minus INTERNAL_API_USAGES).
-        failureLevel.set(
-            listOf(
-                VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
-                VerifyPluginTask.FailureLevel.OVERRIDE_ONLY_API_USAGES,
-            ),
-        )
     }
 }
 

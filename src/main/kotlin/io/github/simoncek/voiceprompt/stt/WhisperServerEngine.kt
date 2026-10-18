@@ -136,6 +136,14 @@ object WhisperServerEngine {
     @Volatile
     private var consecutiveStartupFailures = 0
 
+    /**
+     * Pre-1.1.0 finding 7: the shared home's stale `whisper-server-<pid>.log` files (one per
+     * IDE session, review N11) are cleaned lazily — [transcribeInternal] calls
+     * [StaleServerLogCleanup.ensureOnce] on the first dictation of the session — so the plugin
+     * needs no app-startup hook at all (no internal API, no extension point).
+     */
+    private val staleLogCleanup = StaleServerLogCleanup()
+
     /** Review N8 #7: the /health wait bound (default [STARTUP_TIMEOUT_MS]); tests override it. */
     internal var startupTimeoutMsForTest: Long? = null
     private val startupTimeoutMs: Long get() = startupTimeoutMsForTest ?: STARTUP_TIMEOUT_MS
@@ -221,6 +229,9 @@ object WhisperServerEngine {
         /** Review N9: the processing-settings key scoping the GPU blacklist (see [GpuHealth]); null derives one. */
         processingKey: String? = null,
     ): String {
+        // Pre-1.1.0 finding 7: first dictation of the session — clean the shared home's stale
+        // server logs on a background thread (once per JVM; no app-startup hook needed).
+        staleLogCleanup.ensureOnce()
         val key = processingKey ?: GpuHealth.processingKey(if (useGpu) "GPU" else "CPU", threads)
         // Review N9: a confirmed GPU failure for this model goes straight to the CPU — the
         // fail-and-restart dance happens once, not on every utterance.
